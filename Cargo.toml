@@ -1,0 +1,49 @@
+[package]
+name = "meshcore-client"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native desktop client for MeshCore companion radios (USB serial and Bluetooth LE)"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "meshcore"
+path = "src/main.rs"
+
+[dependencies]
+# GUI: immediate-mode, OpenGL (glow) backend only - no wgpu, no persistence/serde, no accesskit.
+eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows: WinRT Bluetooth LE + Win32 serial/registry, from Microsoft's own bindings.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Devices_Communication",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_System_IO",
+] }
+
+# macOS: CoreBluetooth via objc2 (objc2 is already pulled in by the windowing layer).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData", "NSError", "NSUUID", "NSDictionary", "NSValue", "NSObject"] }
+objc2-core-bluetooth = { version = "0.3", features = ["CBCentralManager", "CBPeripheral", "CBService", "CBCharacteristic", "CBUUID", "CBAdvertisementData", "CBManager", "CBPeer", "CBAttribute", "dispatch2"] }
+dispatch2 = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
