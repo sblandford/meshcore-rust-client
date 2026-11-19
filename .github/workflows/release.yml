@@ -77,9 +77,14 @@ jobs:
           $t = (Get-Content LICENSE -Raw).Replace('\', '\\').Replace('{', '\{').Replace('}', '\}') -replace "`r?`n", "\par`r`n"
           New-Item -ItemType Directory build -Force | Out-Null
           "{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs16 $t}" | Set-Content -Encoding ascii build/license.rtf
-          wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext `
+          $out = & wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext `
             -d Version=$ver -d Root="$PWD" -d Exe="$PWD\target\release\meshcore.exe" -d LicenseRtf="$PWD\build\license.rtf" `
-            -o "meshcore-$env:GITHUB_REF_NAME-windows-x86_64.msi"
+            -o "meshcore-$env:GITHUB_REF_NAME-windows-x86_64.msi" 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          # Surface WiX diagnostics as annotations (readable without downloading logs).
+          $out | Where-Object { "$_" -match '(error|warning) WIX' } | ForEach-Object { Write-Host "::warning::$_" }
+          if ($code -ne 0) { Write-Host "::error::wix build failed with exit code $code"; exit $code }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
