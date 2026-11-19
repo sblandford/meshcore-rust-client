@@ -268,18 +268,24 @@ mod tests {
         let t = std::time::Instant::now();
         fonts.ensure(&ctx, ["你好 世界", "مرحبا"]);
         let took = t.elapsed();
-        if fonts.loaded.is_empty() {
-            eprintln!("no CJK/Arabic system font on this machine; skipping");
-            return;
-        }
         eprintln!("loaded {} system font(s) in {took:?}", fonts.loaded.len());
-        assert!(fonts.covered('你') && fonts.covered('界'));
         let n = fonts.loaded.len();
-        fonts.ensure(&ctx, ["你好", "世界"]); // already handled: no further loading
+        fonts.ensure(&ctx, ["你好", "世界", "مرحبا"]); // already handled: no further loading
         assert_eq!(fonts.loaded.len(), n);
+        // Each script is checked only if this machine has a font for it (CI runners may not).
         let _ = ctx.run_ui(Default::default(), |_| {});
         let uv = |c: char| ctx.fonts_mut(|f| f.layout_no_wrap(c.to_string(), FontId::proportional(14.0), egui::Color32::WHITE).rows[0].row.glyphs[0].uv_rect);
-        assert_ne!(uv('你'), uv('\u{10fffd}'));
+        let replacement = uv('\u{10fffd}');
+        for (script, chars) in [("CJK", ['你', '界']), ("Arabic", ['م', 'ر'])] {
+            if !fonts.covered(chars[0]) {
+                eprintln!("no {script} system font on this machine; skipping {script} checks");
+                continue;
+            }
+            for c in chars {
+                assert!(fonts.covered(c), "{script}: {c} not covered although {} is", chars[0]);
+                assert_ne!(uv(c), replacement, "{c} renders as the replacement glyph");
+            }
+        }
     }
 
     #[test]
