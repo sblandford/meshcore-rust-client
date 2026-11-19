@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod fonts;
 mod link;
 mod proto;
 mod store;
@@ -157,6 +158,20 @@ fn probe_cli(arg: &str, pin: u32) {
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    // `--check-fonts <text>`: report which system fonts would be loaded to draw <text>.
+    if let Some(i) = args.iter().position(|a| a == "--check-fonts") {
+        let ctx = eframe::egui::Context::default();
+        let mut f = fonts::Fonts::install(&ctx);
+        let text = args.get(i + 1).cloned().unwrap_or_default();
+        f.ensure(&ctx, [text.as_str()]);
+        for name in f.loaded_names() {
+            println!("loaded {name}");
+        }
+        for c in text.chars().filter(|c| !c.is_whitespace() && !f.can_draw(*c)) {
+            println!("cannot draw {c:?} (U+{:04X})", c as u32);
+        }
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--scan") {
         scan_cli();
         return Ok(());

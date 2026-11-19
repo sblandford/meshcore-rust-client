@@ -1,6 +1,6 @@
 [package]
 name = "meshcore-client"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Rust Desktop Client for MeshCore: independent native client for MeshCore companion radios (USB serial and Bluetooth LE)"
 license = "GPL-3.0-only"
@@ -11,7 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 # GUI: immediate-mode, OpenGL (glow) backend only - no wgpu, no persistence/serde, no accesskit.
-eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+# Fonts are bundled from assets/fonts instead of egui's default set (see src/fonts.rs).
+eframe = { version = "0.35", default-features = false, features = ["glow", "x11", "wayland"] }
+# Font parser already used inside egui; used directly to pick system fallback fonts.
+skrifa = { version = "0.42", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

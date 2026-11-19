@@ -86,6 +86,9 @@ struct ChanForm {
 
 pub struct Gui {
     app: App,
+    fonts: crate::fonts::Fonts,
+    /// Size of the text sets last checked for missing glyphs.
+    font_check: (usize, usize, usize, usize, usize),
     show_connect: bool,
     ports: Vec<(String, String)>,
     scanner: Option<Scanner>,
@@ -118,6 +121,8 @@ impl Gui {
         let app = App::new(Arc::new(move || ctx.request_repaint()));
         let pin = app.settings.get("ble_pin").unwrap_or("123456").to_string();
         Gui {
+            fonts: crate::fonts::Fonts::install(&cc.egui_ctx),
+            font_check: (usize::MAX, 0, 0, 0, 0),
             app,
             show_connect: true,
             ports: serial::list_ports(),
@@ -141,6 +146,28 @@ impl Gui {
             route: None,
             block_name: String::new(),
         }
+    }
+
+    /// Load system fonts for any characters in names or messages the bundled fonts can't draw.
+    fn check_fonts(&mut self, ctx: &egui::Context) {
+        let a = &self.app;
+        let msgs: usize = a.chats.values().map(|c| c.msgs.len()).sum();
+        let compose: usize = self.compose.values().map(|t| t.len()).sum();
+        let sig = (msgs, a.contacts.len(), a.channels.len() + a.me.as_ref().map(|m| m.name.len()).unwrap_or(0), a.discovered.len(), compose);
+        if sig == self.font_check {
+            return;
+        }
+        self.font_check = sig;
+        let texts = a
+            .chats
+            .values()
+            .flat_map(|c| c.msgs.iter().flat_map(|m| [m.text.as_str(), m.author.as_str()]))
+            .chain(a.contacts.iter().map(|c| c.name.as_str()))
+            .chain(a.discovered.iter().map(|c| c.name.as_str()))
+            .chain(a.channels.iter().map(|c| c.name.as_str()))
+            .chain(a.me.iter().map(|m| m.name.as_str()))
+            .chain(self.compose.values().map(|t| t.as_str()));
+        self.fonts.ensure(ctx, texts);
     }
 
     fn load_form(&mut self) {
@@ -1777,6 +1804,7 @@ impl eframe::App for Gui {
         if std::mem::take(&mut self.app.attention) && self.app.settings.get("flash") != Some("0") && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
         }
+        self.check_fonts(ctx);
         let unread = self.app.total_unread();
         let name = self.app.me.as_ref().map(|m| m.name.as_str()).unwrap_or("");
         let title = match (name.is_empty(), unread) {
@@ -2022,6 +2050,7 @@ mod tests {
         };
         let key = ChatKey::Channel([1; 16]);
         let ctx = egui::Context::default();
+        let _fonts = crate::fonts::Fonts::install(&ctx);
         let mut rect = egui::Rect::NOTHING;
         let mut frame = |events: Vec<egui::Event>, rect: &mut egui::Rect| {
             let input = egui::RawInput {

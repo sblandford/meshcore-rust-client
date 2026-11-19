@@ -33,6 +33,9 @@ companion radios. It runs on Linux, Windows and macOS, and connects over **USB s
 - **Device:** model and firmware, battery, storage, core/radio/packet statistics, clock check and sync, the
   radio's own telemetry, sensor settings (such as GPS), local command console (firmware v1.18+), BLE PIN,
   private key export and import, reboot and factory reset.
+- **Emoji and other scripts:** modern emoji are drawn with a bundled monochrome Noto Emoji. Text in other
+  scripts (Chinese, Japanese, Korean, Arabic, Indic, Thai and so on) uses your system's fonts, which are loaded
+  only when such text appears.
 - **Alerts:** messages that mention you (`@[your name]`) are highlighted, and the taskbar flashes when a message
   arrives while the window is in the background.
 - **Right-click menus:**
@@ -93,6 +96,7 @@ itself are all implemented in-tree.
 meshcore-rust-client --scan                      # list serial ports and MeshCore BLE radios
 meshcore-rust-client --probe /dev/ttyACM0        # read-only connection test (device info, channels, contacts)
 meshcore-rust-client --probe <BLE id> [PIN]      # BLE id as shown by --scan
+meshcore-rust-client --check-fonts "text"        # which system fonts are needed to draw some text
 ```
 
 `tools/radio_sim.py` simulates a companion radio on a pseudo-terminal. It prints the pty path, which you can pass
