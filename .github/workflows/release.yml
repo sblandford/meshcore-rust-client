@@ -20,12 +20,20 @@ jobs:
   linux:
     name: Linux (portable tar.gz)
     runs-on: ubuntu-22.04 # older glibc, so the binary runs on more distributions
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
       - name: Check third-party notices match Cargo.lock
         run: python3 tools/third_party_notices.py --check
-      - run: cargo test
+      - name: Test
+        run: |
+          set +e
+          cargo test 2>&1 | tee test.log
+          code=${PIPESTATUS[0]}
+          # Surface failures as annotations (readable without downloading logs).
+          grep -E "panicked|FAILED|^error" test.log | head -20 | while read -r l; do echo "::error::$l"; done
+          exit $code
       - run: cargo build --release
       - name: Package
         run: |
@@ -39,12 +47,20 @@ jobs:
   flatpak:
     name: Linux (Flatpak)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install flatpak-builder
+        timeout-minutes: 15
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q flatpak flatpak-builder
+          apt_opts="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get $apt_opts update -q && \
+              sudo timeout 600 apt-get $apt_opts install -y -q flatpak flatpak-builder && break
+            echo "::warning::apt attempt $attempt failed; retrying"
+            sleep 20
+          done
+          command -v flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
       - name: Build
         run: |
@@ -60,11 +76,17 @@ jobs:
   windows:
     name: Windows (MSI + portable zip)
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults: { run: { shell: pwsh } }
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable; rustup default stable
-      - run: cargo test
+      - name: Test
+        run: |
+          cargo test 2>&1 | Tee-Object -FilePath test.log
+          $code = $LASTEXITCODE
+          Select-String -Path test.log -Pattern 'panicked|FAILED|^error' | Select-Object -First 20 | ForEach-Object { Write-Host "::error::$($_.Line)" }
+          exit $code
       - run: cargo build --release
       - name: Portable zip
         run: |
@@ -99,10 +121,17 @@ jobs:
   macos:
     name: macOS (universal DMG)
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - run: cargo test
+      - name: Test
+        run: |
+          set +e
+          cargo test 2>&1 | tee test.log
+          code=${PIPESTATUS[0]}
+          grep -E "panicked|FAILED|^error" test.log | head -20 | while read -r l; do echo "::error::$l"; done
+          exit $code
       - name: Build both architectures
         run: |
           cargo build --release --target aarch64-apple-darwin

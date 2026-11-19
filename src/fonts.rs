@@ -3,6 +3,7 @@
 //! Thai, symbols…). A system font is only read into memory once text actually needs it.
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontTweak};
+use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
 use std::collections::HashSet;
 #[cfg_attr(windows, allow(unused_imports))]
@@ -54,7 +55,7 @@ impl Fonts {
 
     /// Diagnostics: can `c` be drawn with the fonts loaded so far?
     pub fn can_draw(&self, c: char) -> bool {
-        (c as u32) < 0x80 || self.covered(c)
+        (c as u32) < 0x80 || c.is_whitespace() || self.covered(c)
     }
 
     /// Diagnostics: names of the system fonts loaded so far.
@@ -67,7 +68,7 @@ impl Fonts {
         let mut candidates: Vec<char> = Vec::new();
         for t in texts {
             for c in t.chars() {
-                if (c as u32) < 0x80 || c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0000}'..='\u{e007f}') {
+                if (c as u32) < 0x80 || c.is_control() || c.is_whitespace() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0000}'..='\u{e007f}') {
                     continue; // ASCII, controls and invisible joiners/variation selectors
                 }
                 if self.tried.insert(c) {
@@ -118,12 +119,18 @@ impl Fonts {
     }
 }
 
-/// True if the font has an outline (not just a colour bitmap) for `c`.
+/// True if the font has a visible outline (not just a colour bitmap) for `c`.
+/// Some colour-bitmap emoji fonts also carry an outline table full of *empty* glyphs, so the
+/// outline must have a non-empty bounding box.
 fn covers(bytes: &[u8], index: u32, c: char) -> bool {
     let Ok(font) = FontRef::from_index(bytes, index) else { return false };
-    match font.charmap().map(c) {
-        Some(gid) if gid.to_u32() != 0 => font.outline_glyphs().get(gid).is_some(),
-        _ => false,
+    let Some(gid) = font.charmap().map(c).filter(|g| g.to_u32() != 0) else { return false };
+    if font.outline_glyphs().get(gid).is_none() {
+        return false;
+    }
+    match font.glyph_metrics(Size::unscaled(), LocationRef::default()).bounds(gid) {
+        Some(b) => b.x_max > b.x_min && b.y_max > b.y_min,
+        None => false,
     }
 }
 
@@ -230,6 +237,16 @@ mod tests {
         }
         // egui's UI symbols still come from the icon font.
         assert!(covers(ICONS, 0, '⟳'));
+    }
+
+    #[test]
+    fn rejects_fonts_whose_outlines_are_empty() {
+        // Older colour-bitmap emoji fonts map the character to an *empty* outline glyph.
+        let b = include_bytes!("../tests/fixtures/empty-outline-fox.ttf");
+        let font = FontRef::from_index(b, 0).unwrap();
+        let gid = font.charmap().map('🦊').unwrap();
+        assert!(font.outline_glyphs().get(gid).is_some(), "fixture should fool an outline-presence check");
+        assert!(!covers(b, 0, '🦊'));
     }
 
     #[test]
