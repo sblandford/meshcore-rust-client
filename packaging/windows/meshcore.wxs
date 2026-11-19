@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Windows installer (WiX Toolset v5). Built by the release workflow:
+    wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext
+      -d Version=1.2.3 -d Root=<repo dir> -d Exe=<path to meshcore.exe> -d LicenseRtf=<path> -o MeshCore.msi
+  The UpgradeCode must never change: it lets newer MSIs replace older installs.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="MeshCore"
+           Manufacturer="MeshCore desktop client"
+           Version="$(var.Version)"
+           UpgradeCode="4217BDE5-A964-4621-B307-FBC411142A02"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="MeshCore desktop client installer" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of MeshCore is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(var.Root)\packaging\icons\meshcore.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/sblandford/meshcore-rust-client" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/sblandford/meshcore-rust-client/issues" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="MeshCore">
+        <Component Id="MainExecutable">
+          <File Id="MeshCoreExe" Source="$(var.Exe)" Name="meshcore.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Documents">
+          <File Id="LicenseFile" Source="$(var.Root)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+          <File Id="ReadmeFile" Source="$(var.Root)\README.md" Name="README.md" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenuEntry"
+                  Name="MeshCore"
+                  Description="Chat over MeshCore LoRa companion radios"
+                  Target="[INSTALLFOLDER]meshcore.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RegistryValue Root="HKMU" Key="Software\MeshCoreClient" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="MeshCore" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="Documents" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+
+    <!-- Offer to start the app when the installer finishes. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch MeshCore" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="LaunchApplication" Directory="INSTALLFOLDER" ExeCommand="[INSTALLFOLDER]meshcore.exe" Return="asyncNoWait" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

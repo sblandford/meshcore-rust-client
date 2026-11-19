@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag like v0.1.0 to build all platforms and publish a GitHub release.
+# Push a tag like v0.2.0 to build every package and publish a GitHub release.
+# "Run workflow" (manual dispatch) builds the same packages as artifacts only.
 on:
   push:
     tags: ["v*"]
@@ -11,116 +12,135 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  APP_ID: io.github.sblandford.MeshCoreClient
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: linux-x86_64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64 }
-          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-arm64 }
-          - { os: macos-latest, target: x86_64-apple-darwin, name: macos-x86_64 }
-    runs-on: ${{ matrix.os }}
+  linux:
+    name: Linux (portable tar.gz)
+    runs-on: ubuntu-22.04 # older glibc, so the binary runs on more distributions
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust target
-        run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
-
-      - name: Test
-        if: matrix.target != 'x86_64-apple-darwin'
-        run: cargo test --target ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
+      - run: rustup update stable && rustup default stable
+      - run: cargo test
+      - run: cargo build --release
+      - name: Package
         run: |
-          d=meshcore-${{ github.ref_name }}-${{ matrix.name }}
-          mkdir "$d" && cp target/${{ matrix.target }}/release/meshcore README.md LICENSE "$d/"
+          d=meshcore-${GITHUB_REF_NAME}-linux-x86_64
+          mkdir -p "$d/icons" && cp target/release/meshcore README.md INSTALL.md LICENSE "$d/"
+          cp packaging/linux/$APP_ID.desktop "$d/" && cp packaging/icons/meshcore-256.png "$d/icons/$APP_ID.png"
           tar czf "$d.tar.gz" "$d"
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: "meshcore-*.tar.gz" }
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+  flatpak:
+    name: Linux (Flatpak)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak-builder
         run: |
-          $d = "meshcore-${{ github.ref_name }}-${{ matrix.name }}"
+          sudo apt-get update -q
+          sudo apt-get install -y -q flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo=flatpak-repo build-dir packaging/linux/$APP_ID.yml
+      - name: Bundle
+        run: |
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            flatpak-repo "meshcore-${GITHUB_REF_NAME}-linux-x86_64.flatpak" $APP_ID master
+      - uses: actions/upload-artifact@v4
+        with: { name: flatpak, path: "meshcore-*.flatpak" }
+
+  windows:
+    name: Windows (MSI + portable zip)
+    runs-on: windows-latest
+    defaults: { run: { shell: pwsh } }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable; rustup default stable
+      - run: cargo test
+      - run: cargo build --release
+      - name: Portable zip
+        run: |
+          $d = "meshcore-$env:GITHUB_REF_NAME-windows-x86_64"
           New-Item -ItemType Directory $d | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/meshcore.exe, README.md, LICENSE $d
+          Copy-Item target/release/meshcore.exe, README.md, INSTALL.md, LICENSE $d
           Compress-Archive -Path $d -DestinationPath "$d.zip"
-
-      - name: Package (macOS .app)
-        if: runner.os == 'macOS'
+      - name: MSI installer
         run: |
-          d=meshcore-${{ github.ref_name }}-${{ matrix.name }}
-          app="$d/MeshCore.app"
-          ver="${GITHUB_REF_NAME#v}"
-          mkdir -p "$app/Contents/MacOS"
-          cp target/${{ matrix.target }}/release/meshcore "$app/Contents/MacOS/meshcore"
-          cat > "$app/Contents/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>CFBundleName</key><string>MeshCore</string>
-            <key>CFBundleDisplayName</key><string>MeshCore</string>
-            <key>CFBundleIdentifier</key><string>io.github.sblandford.meshcore-client</string>
-            <key>CFBundleExecutable</key><string>meshcore</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${ver}</string>
-            <key>CFBundleVersion</key><string>${ver}</string>
-            <key>LSMinimumSystemVersion</key><string>11.0</string>
-            <key>NSHighResolutionCapable</key><true/>
-            <key>NSBluetoothAlwaysUsageDescription</key><string>MeshCore connects to your companion radio over Bluetooth.</string>
-          </dict></plist>
-          EOF
-          codesign --force --deep --sign - "$app"
-          cp README.md LICENSE "$d/"
-          ditto -c -k --keepParent "$d" "$d.zip"
-
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add --global WixToolset.UI.wixext/5.0.2
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          # The installer's licence page needs RTF.
+          $t = (Get-Content LICENSE -Raw).Replace('\', '\\').Replace('{', '\{').Replace('}', '\}') -replace "`r?`n", "\par`r`n"
+          New-Item -ItemType Directory build -Force | Out-Null
+          "{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs16 $t}" | Set-Content -Encoding ascii build/license.rtf
+          wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext `
+            -d Version=$ver -d Root="$PWD" -d Exe="$PWD\target\release\meshcore.exe" -d LicenseRtf="$PWD\build\license.rtf" `
+            -o "meshcore-$env:GITHUB_REF_NAME-windows-x86_64.msi"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
+          name: windows
           path: |
-            meshcore-*.tar.gz
+            meshcore-*.msi
             meshcore-*.zip
 
+  macos:
+    name: macOS (universal DMG)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo test
+      - name: Build both architectures
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: App bundle and DMG
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          app=dmg/MeshCore.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/meshcore" \
+            target/aarch64-apple-darwin/release/meshcore target/x86_64-apple-darwin/release/meshcore
+          sed "s/@VERSION@/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          cp packaging/icons/meshcore.icns "$app/Contents/Resources/meshcore.icns"
+          codesign --force --deep --sign - "$app"
+          ln -s /Applications dmg/Applications
+          cp INSTALL.md LICENSE dmg/
+          hdiutil create -volname "MeshCore $ver" -srcfolder dmg -ov -format UDZO "meshcore-${GITHUB_REF_NAME}-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: "meshcore-*.dmg" }
+
   release:
-    needs: build
+    needs: [linux, flatpak, windows, macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+        with: { path: dist, merge-multiple: true }
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > notes.md <<'EOF'
+          t=${GITHUB_REF_NAME}
+          cat > notes.md <<EOF
           Native desktop client for MeshCore companion radios over USB serial or Bluetooth LE.
 
           ## Downloads
-          | Platform | File |
-          |---|---|
-          | Linux x86_64 | `meshcore-*-linux-x86_64.tar.gz`: extract and run `./meshcore` |
-          | Windows 10/11 x86_64 | `meshcore-*-windows-x86_64.zip`: extract and run `meshcore.exe` |
-          | macOS Apple Silicon | `meshcore-*-macos-arm64.zip`: contains `MeshCore.app` |
-          | macOS Intel | `meshcore-*-macos-x86_64.zip`: contains `MeshCore.app` |
+          | Platform | Installer | Portable |
+          |---|---|---|
+          | Windows 10/11 (x86_64) | \`meshcore-$t-windows-x86_64.msi\` | \`meshcore-$t-windows-x86_64.zip\` |
+          | macOS 11+ (Apple Silicon and Intel) | \`meshcore-$t-macos-universal.dmg\` | |
+          | Linux (x86_64) | \`meshcore-$t-linux-x86_64.flatpak\` | \`meshcore-$t-linux-x86_64.tar.gz\` |
 
-          The binaries are not signed with a paid certificate:
-          - **Windows:** SmartScreen may warn. Click *More info › Run anyway*.
-          - **macOS:** the app is ad-hoc signed only. Right-click › *Open* the first time, or run
-            `xattr -dr com.apple.quarantine MeshCore.app`.
-          - **Linux:** USB access needs membership of the `dialout` group (`uucp` on some distributions).
-            Bluetooth needs BlueZ.
-
-          Verify downloads with `SHA256SUMS.txt`.
+          See [INSTALL.md](https://github.com/${GITHUB_REPOSITORY}/blob/$t/INSTALL.md) for step-by-step installation
+          instructions, including the first-run security prompts for these unsigned packages.
+          Verify downloads with \`SHA256SUMS.txt\`.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* --title "MeshCore desktop client $GITHUB_REF_NAME" --notes-file notes.md --generate-notes
+          gh release create "$t" dist/* --title "MeshCore desktop client $t" --notes-file notes.md --generate-notes

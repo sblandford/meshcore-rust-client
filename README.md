@@ -18,10 +18,26 @@ companion radios. It runs on Linux, Windows and macOS, and connects over **USB s
 - **Node settings:** name, location, location in adverts, manual contact adding, telemetry sharing, extra ACKs.
 - **Radio settings:** frequency, bandwidth, spreading factor, coding rate, TX power.
 - **Device:** model and firmware, battery, storage, core/radio/packet statistics, clock sync, BLE PIN, reboot.
+- **Right-click menus:**
+  - Messages: copy, reply (`@[name]`), send again, message details (times, route, SNR, delivery and round trip),
+    message the author directly, block the sender, delete.
+  - Contacts and channels in the sidebar or the chat title: mark as read/unread, plus all contact or channel actions.
+  - Log lines and status/telemetry tables: copy.
+- **Blocking:** contacts are blocked by key; channel and room-server senders by name. Blocked messages are dropped
+  on arrival and hidden. Manage the list in Settings › Blocked.
 - Zero-hop and flood adverts, a received-packet log (SNR/RSSI and packet type), and an event log.
 - Message history is kept locally per radio (radios only queue messages until they are synced).
   It is stored in `~/.local/share/meshcore-client` (Linux), `~/Library/Application Support/meshcore-client` (macOS)
   or `%APPDATA%\meshcore-client` (Windows).
+
+## Installing
+
+Installers are on the [Releases page](https://github.com/sblandford/meshcore-rust-client/releases/latest):
+- **Windows:** `.msi`
+- **macOS:** universal `.dmg`
+- **Linux:** `.flatpak`
+
+Portable archives are also provided. See **[INSTALL.md](INSTALL.md)** for step-by-step instructions.
 
 ## Building
 

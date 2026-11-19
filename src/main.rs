@@ -125,7 +125,9 @@ fn main() -> eframe::Result<()> {
     let mut opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MeshCore")
-            .with_app_id("meshcore-client")
+            // Must match the .desktop file / Flatpak ID so desktops show the right icon.
+            .with_app_id("io.github.sblandford.MeshCoreClient")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../packaging/icons/meshcore-256.png")).unwrap_or_default())
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([640.0, 420.0]),
         ..Default::default()

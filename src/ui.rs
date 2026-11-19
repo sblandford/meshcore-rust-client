@@ -24,6 +24,18 @@ enum SettingsTab {
     Radio,
     Channels,
     Device,
+    Blocked,
+}
+
+/// What the user picked from a message's context menu.
+enum MsgAction {
+    Resend(String),
+    Reply(String),
+    Info(u64),
+    Delete(u64),
+    BlockKey([u8; 32]),
+    BlockName(String),
+    Open([u8; 32]),
 }
 
 #[derive(Default)]
@@ -70,6 +82,8 @@ pub struct Gui {
     password: String,
     confirm: Option<(String, Box<dyn Fn(&mut App)>)>,
     title: String,
+    info: Option<(ChatKey, u64)>,
+    block_name: String,
 }
 
 const BWS: [f32; 10] = [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0];
@@ -99,6 +113,8 @@ impl Gui {
             password: String::new(),
             confirm: None,
             title: String::new(),
+            info: None,
+            block_name: String::new(),
         }
     }
 
@@ -271,7 +287,10 @@ impl Gui {
             list.sort_by_key(|c| (!c.is_favourite(), std::cmp::Reverse(activity(c))));
             let rows: Vec<(ChatKey, &'static str, String, String)> = list
                 .iter()
-                .map(|c| (ChatKey::Contact(c.pubkey), icon(c.kind), format!("{}{}", if c.is_favourite() { "★ " } else { "" }, c.name), util::ago(c.last_advert as u64)))
+                .map(|c| {
+                    let sub = if self.app.is_key_blocked(&c.pubkey) { "blocked".to_string() } else { util::ago(c.last_advert as u64) };
+                    (ChatKey::Contact(c.pubkey), icon(c.kind), format!("{}{}", if c.is_favourite() { "★ " } else { "" }, c.name), sub)
+                })
                 .collect();
             // Conversations with senders no longer in the contact list.
             let mut orphans: Vec<ChatKey> = self
@@ -320,6 +339,33 @@ impl Gui {
         if resp.clicked() {
             self.select(key);
         }
+        resp.context_menu(|ui| self.row_menu(ui, key));
+    }
+
+    /// Right-click menu for a channel/contact row in the sidebar.
+    fn row_menu(&mut self, ui: &mut egui::Ui, key: ChatKey) {
+        if ui.button("Open").clicked() {
+            self.select(key);
+            ui.close();
+        }
+        let unread = self.app.chats.get(&key).map(|c| c.unread).unwrap_or(0);
+        if unread > 0 {
+            if ui.button("Mark as read").clicked() {
+                if let Some(c) = self.app.chats.get_mut(&key) {
+                    c.unread = 0;
+                }
+                ui.close();
+            }
+        } else if self.app.chats.get(&key).map(|c| !c.msgs.is_empty()).unwrap_or(false) && ui.button("Mark as unread").clicked() {
+            self.app.mark_unread(key);
+            ui.close();
+        }
+        ui.separator();
+        let contact = match key {
+            ChatKey::Contact(pk) => self.app.contact(&pk).cloned(),
+            _ => None,
+        };
+        self.chat_menu(ui, key, contact.as_ref());
     }
 
     fn select(&mut self, key: ChatKey) {
@@ -342,13 +388,22 @@ impl Gui {
         egui::Panel::top("chat_header").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.heading(&title);
+                let h = ui.add(egui::Label::new(RichText::new(&title).heading()).sense(egui::Sense::click()));
+                h.context_menu(|ui| self.chat_menu(ui, key, contact.as_ref()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.menu_button("Actions…", |ui| self.chat_menu(ui, key, contact.as_ref()));
                 });
             });
             match (&key, &contact) {
                 (ChatKey::Contact(pk), Some(c)) => {
+                    if self.app.is_key_blocked(pk) {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(Color32::LIGHT_RED, "Blocked: incoming messages from this contact are dropped.");
+                            if ui.small_button("Unblock").clicked() {
+                                self.app.set_key_blocked(*pk, false);
+                            }
+                        });
+                    }
                     ui.label(
                         RichText::new(format!(
                             "{} · {} · heard {} · {}",
@@ -410,7 +465,7 @@ impl Gui {
         let mono = is_repeater;
         let room = contact.as_ref().map(|c| c.kind == proto::ADV_ROOM).unwrap_or(false);
         let is_channel = matches!(key, ChatKey::Channel(_));
-        let mut resend: Option<String> = None;
+        let mut action: Option<MsgAction> = None;
         ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(6.0);
             let Some(chat) = self.app.chats.get(&key) else {
@@ -419,19 +474,41 @@ impl Gui {
             };
             let mut last_day = String::new();
             for m in &chat.msgs {
+                if !m.out && (is_channel || room) && self.app.is_name_blocked(&m.author) {
+                    continue;
+                }
                 let day = util::fmt_time(m.recv);
                 let day = day.split(' ').next().unwrap_or("").to_string();
                 if day.contains('-') && day != last_day {
                     ui.vertical_centered(|ui| ui.label(RichText::new(&day).small().color(Color32::GRAY)));
                     last_day = day;
                 }
-                if let Some(r) = bubble(ui, m, mono, is_channel || room) {
-                    resend = Some(r);
+                if let Some(a) = bubble(ui, m, mono, is_channel || room, &self.app, key) {
+                    action = Some(a);
                 }
             }
         });
-        if let Some(t) = resend {
-            self.app.send_text(key, &t);
+        match action {
+            Some(MsgAction::Resend(t)) => self.app.send_text(key, &t),
+            Some(MsgAction::Reply(name)) => {
+                let c = self.compose.entry(key).or_default();
+                let mention = format!("@[{name}] ");
+                if !c.starts_with(&mention) {
+                    c.insert_str(0, &mention);
+                }
+            }
+            Some(MsgAction::Info(id)) => self.info = Some((key, id)),
+            Some(MsgAction::Delete(id)) => self.app.delete_message(key, id),
+            Some(MsgAction::BlockKey(pk)) => {
+                let name = self.app.name_of(&pk);
+                self.confirm = Some((format!("Block '{name}'? Direct messages from this contact will be dropped."), Box::new(move |a: &mut App| a.set_key_blocked(pk, true))));
+            }
+            Some(MsgAction::BlockName(n)) => {
+                let msg = format!("Block sender '{n}'? Their channel and room posts will be hidden and dropped.");
+                self.confirm = Some((msg, Box::new(move |a: &mut App| a.set_name_blocked(&n, true))));
+            }
+            Some(MsgAction::Open(pk)) => self.select(ChatKey::Contact(pk)),
+            None => {}
         }
     }
 
@@ -467,7 +544,36 @@ impl Gui {
                 ui.ctx().copy_text(hex(&pk));
                 ui.close();
             }
+            if c.kind == proto::ADV_REPEATER || c.kind == proto::ADV_ROOM {
+                if ui.add_enabled(on, egui::Button::new("Request status")).clicked() {
+                    self.app.request_status(pk);
+                    ui.close();
+                }
+                if c.kind == proto::ADV_REPEATER && ui.add_enabled(on, egui::Button::new("Trace route")).clicked() {
+                    if let Err(e) = self.app.trace(pk) {
+                        self.app.toast(e);
+                    }
+                    ui.close();
+                }
+                if self.app.remotes.get(&pk).and_then(|r| r.logged_in).is_some() && ui.add_enabled(on, egui::Button::new("Log out")).clicked() {
+                    self.app.logout(pk);
+                    ui.close();
+                }
+            }
             ui.separator();
+            if self.app.is_key_blocked(&pk) {
+                if ui.button("Unblock contact").clicked() {
+                    self.app.set_key_blocked(pk, false);
+                    ui.close();
+                }
+            } else if ui.button("Block contact…").clicked() {
+                let name = c.name.clone();
+                self.confirm = Some((
+                    format!("Block '{name}'? Direct messages from this contact will be dropped (you can unblock in Settings › Blocked)."),
+                    Box::new(move |a: &mut App| a.set_key_blocked(pk, true)),
+                ));
+                ui.close();
+            }
             if ui.add_enabled(on, egui::Button::new(RichText::new("Remove contact").color(Color32::LIGHT_RED))).clicked() {
                 let name = c.name.clone();
                 self.confirm = Some((format!("Remove contact '{name}' from the radio?"), Box::new(move |a: &mut App| a.remove_contact(pk))));
@@ -492,8 +598,9 @@ impl Gui {
             }
         }
         ui.separator();
-        if ui.button("Clear local history").clicked() {
-            self.app.clear_history(key);
+        if ui.button("Clear local history…").clicked() {
+            let title = self.app.chat_title(&key);
+            self.confirm = Some((format!("Delete all locally stored messages for '{title}'?"), Box::new(move |a: &mut App| a.clear_history(key))));
             ui.close();
         }
     }
@@ -553,7 +660,7 @@ impl Gui {
             ui.label(RichText::new(d).monospace().small());
         }
         let table = |ui: &mut egui::Ui, id: &str, title: String, rows: &[(String, String)]| {
-            egui::CollapsingHeader::new(title).id_salt(id).default_open(true).show(ui, |ui| {
+            let r = egui::CollapsingHeader::new(title).id_salt(id).default_open(true).show(ui, |ui| {
                 egui::Grid::new(id).num_columns(4).spacing([16.0, 2.0]).show(ui, |ui| {
                     for (i, (k, v)) in rows.iter().enumerate() {
                         ui.label(RichText::new(k).color(Color32::GRAY));
@@ -563,6 +670,12 @@ impl Gui {
                         }
                     }
                 });
+            });
+            r.header_response.context_menu(|ui| {
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(rows.iter().map(|(k, v)| format!("{k}: {v}\n")).collect());
+                    ui.close();
+                }
             });
         };
         if !r.status.is_empty() {
@@ -711,14 +824,20 @@ impl Gui {
                 ui.selectable_value(&mut self.tab, SettingsTab::Radio, "Radio");
                 ui.selectable_value(&mut self.tab, SettingsTab::Channels, "Channels");
                 ui.selectable_value(&mut self.tab, SettingsTab::Device, "Device");
+                ui.selectable_value(&mut self.tab, SettingsTab::Blocked, "Blocked");
             });
             ui.separator();
             let on = self.app.connected();
+            if self.tab == SettingsTab::Blocked {
+                self.blocked_tab(ui);
+                return;
+            }
             ui.add_enabled_ui(on, |ui| match self.tab {
                 SettingsTab::Node => self.node_tab(ui),
                 SettingsTab::Radio => self.radio_tab(ui),
                 SettingsTab::Channels => self.channels_tab(ui),
                 SettingsTab::Device => self.device_tab(ui),
+                SettingsTab::Blocked => {}
             });
         });
         self.show_settings = open;
@@ -920,6 +1039,111 @@ impl Gui {
         }
     }
 
+    fn blocked_tab(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Blocked messages are dropped when they arrive. Blocking is local to this computer; the radio still receives them.").small().color(Color32::GRAY));
+        ui.add_space(4.0);
+        ui.strong("Contacts");
+        if self.app.blocked_keys.is_empty() {
+            ui.label(RichText::new("None").color(Color32::GRAY));
+        }
+        for pk in self.app.blocked_keys.clone() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}  ({})", self.app.name_of(&pk), hex(&pk[..6])));
+                if ui.small_button("Unblock").clicked() {
+                    self.app.set_key_blocked(pk, false);
+                }
+            });
+        }
+        ui.add_space(6.0);
+        ui.strong("Channel / room senders (by name)");
+        if self.app.blocked_names.is_empty() {
+            ui.label(RichText::new("None").color(Color32::GRAY));
+        }
+        for n in self.app.blocked_names.clone() {
+            ui.horizontal(|ui| {
+                ui.label(&n);
+                if ui.small_button("Unblock").clicked() {
+                    self.app.set_name_blocked(&n, false);
+                }
+            });
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.block_name).hint_text("Sender name").desired_width(180.0));
+            if ui.add_enabled(!self.block_name.trim().is_empty(), egui::Button::new("Block name")).clicked() {
+                let n = self.block_name.trim().to_string();
+                self.app.set_name_blocked(&n, true);
+                self.block_name.clear();
+            }
+        });
+    }
+
+    fn info_window(&mut self, ctx: &egui::Context) {
+        let Some((key, id)) = self.info else { return };
+        let Some(m) = self.app.find_message(key, id).cloned() else {
+            self.info = None;
+            return;
+        };
+        let conv = self.app.chat_title(&key);
+        let mut open = true;
+        egui::Window::new("Message details").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            let mut rows: Vec<(&str, String)> = vec![
+                ("Conversation", conv),
+                ("Direction", if m.out { "Sent".into() } else { "Received".into() }),
+            ];
+            if !m.author.is_empty() {
+                rows.push(("Author", m.author.clone()));
+            }
+            rows.push(("Sender timestamp", util::fmt_full(m.ts as u64)));
+            rows.push((if m.out { "Sent at" } else { "Received at" }, util::fmt_full(m.recv)));
+            if !m.out {
+                rows.push(("Route", if m.path_len == 0xFF { "direct".into() } else { format!("{} hop(s), flood", m.path_len & 63) }));
+                if let Some(snr) = m.snr {
+                    rows.push(("SNR", format!("{snr:+.2} dB")));
+                }
+            } else {
+                rows.push((
+                    "Status",
+                    match m.status {
+                        Status::Pending => "sending".into(),
+                        Status::Sent => "sent, awaiting acknowledgement".into(),
+                        Status::Delivered(rtt) if rtt > 0 => format!("delivered (round trip {:.2} s)", rtt as f32 / 1000.0),
+                        Status::Delivered(_) => "delivered".into(),
+                        Status::Failed => "failed".into(),
+                        Status::Received => String::new(),
+                    },
+                ));
+                if m.attempt > 0 {
+                    rows.push(("Attempts", (m.attempt + 1).to_string()));
+                }
+            }
+            rows.push((
+                "Type",
+                match m.txt_type {
+                    proto::TXT_CLI_DATA => "CLI command/reply".into(),
+                    proto::TXT_SIGNED_PLAIN => "signed (room server)".into(),
+                    _ => "text".into(),
+                },
+            ));
+            rows.push(("Length", format!("{} bytes", m.text.len())));
+            egui::Grid::new("msginfo").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                for (k, v) in rows {
+                    ui.label(RichText::new(k).color(Color32::GRAY));
+                    ui.label(v);
+                    ui.end_row();
+                }
+            });
+            ui.separator();
+            ui.add(egui::Label::new(&m.text).wrap());
+            if ui.button("Copy text").clicked() {
+                ui.ctx().copy_text(m.text.clone());
+            }
+        });
+        if !open {
+            self.info = None;
+        }
+    }
+
     fn channel_window(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.chan.take() else { return };
         let mut open = true;
@@ -1035,8 +1259,23 @@ impl Gui {
             ui.separator();
             let lines = if self.show_rx { &self.app.rx_log } else { &self.app.log };
             ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                let mut copy = None;
                 for l in lines {
-                    ui.label(RichText::new(format!("{}  {}", util::fmt_clock(l.t), l.text)).monospace().small());
+                    let line = format!("{}  {}", util::fmt_clock(l.t), l.text);
+                    let r = ui.add(egui::Label::new(RichText::new(&line).monospace().small()).sense(egui::Sense::click()));
+                    r.context_menu(|ui| {
+                        if ui.button("Copy line").clicked() {
+                            copy = Some(line.clone());
+                            ui.close();
+                        }
+                        if ui.button("Copy whole log").clicked() {
+                            copy = Some(lines.iter().map(|l| format!("{}  {}\n", util::fmt_clock(l.t), l.text)).collect());
+                            ui.close();
+                        }
+                    });
+                }
+                if let Some(c) = copy {
+                    ui.ctx().copy_text(c);
                 }
             });
         });
@@ -1126,6 +1365,7 @@ impl eframe::App for Gui {
         }
         self.channel_window(&ctx);
         self.import_window(&ctx);
+        self.info_window(&ctx);
         self.confirm_window(&ctx);
     }
 }
@@ -1146,9 +1386,9 @@ fn name_colour(name: &str) -> Color32 {
     egui::ecolor::Hsva::new(hue, 0.55, 0.85, 1.0).into()
 }
 
-/// Draw one message. Returns text to resend if the user asked for it.
-fn bubble(ui: &mut egui::Ui, m: &Message, mono: bool, show_author: bool) -> Option<String> {
-    let mut resend = None;
+/// Draw one message, with its right-click menu.
+fn bubble(ui: &mut egui::Ui, m: &Message, mono: bool, show_author: bool, app: &App, key: ChatKey) -> Option<MsgAction> {
+    let mut action = None;
     let layout = if m.out { Layout::right_to_left(Align::Min) } else { Layout::left_to_right(Align::Min) };
     let max_w = (ui.available_width() * 0.75).max(200.0);
     ui.with_layout(layout, |ui| {
@@ -1195,19 +1435,63 @@ fn bubble(ui: &mut egui::Ui, m: &Message, mono: bool, show_author: bool) -> Opti
                 ui.label(RichText::new(meta).small().color(Color32::GRAY));
             });
         });
-        r.response.context_menu(|ui| {
+        // Frames only sense hover; make the whole bubble respond to right-clicks.
+        r.response.interact(egui::Sense::click()).context_menu(|ui| {
+            let mut pick = |a: MsgAction| action = Some(a);
             if ui.button("Copy text").clicked() {
                 ui.ctx().copy_text(m.text.clone());
                 ui.close();
             }
-            if m.out && m.status == Status::Failed && ui.button("Send again").clicked() {
-                resend = Some(m.text.clone());
+            let author = (!m.out && show_author && !m.author.is_empty() && m.author != "me").then_some(m.author.as_str());
+            if let Some(a) = author {
+                if ui.button(format!("Reply to {a}")).clicked() {
+                    pick(MsgAction::Reply(a.to_string()));
+                    ui.close();
+                }
+            }
+            if m.out && ui.add_enabled(app.connected(), egui::Button::new("Send again")).clicked() {
+                pick(MsgAction::Resend(m.text.clone()));
+                ui.close();
+            }
+            if ui.button("Message details…").clicked() {
+                pick(MsgAction::Info(m.id));
+                ui.close();
+            }
+            if let Some(a) = author {
+                if let Some(c) = app.contact_by_name(a).filter(|c| ChatKey::Contact(c.pubkey) != key) {
+                    if ui.button(format!("Message {a} directly")).clicked() {
+                        pick(MsgAction::Open(c.pubkey));
+                        ui.close();
+                    }
+                }
+            }
+            if !m.out {
+                ui.separator();
+                match (key, author) {
+                    (_, Some(a)) if !app.is_name_blocked(a) => {
+                        if ui.button(format!("Block sender '{a}'…")).clicked() {
+                            pick(MsgAction::BlockName(a.to_string()));
+                            ui.close();
+                        }
+                    }
+                    (ChatKey::Contact(pk), None) if !show_author && !app.is_key_blocked(&pk) => {
+                        if ui.button(format!("Block {}…", app.name_of(&pk))).clicked() {
+                            pick(MsgAction::BlockKey(pk));
+                            ui.close();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ui.separator();
+            if ui.button(RichText::new("Delete message").color(Color32::LIGHT_RED)).clicked() {
+                pick(MsgAction::Delete(m.id));
                 ui.close();
             }
         });
     });
     ui.add_space(4.0);
-    resend
+    action
 }
 
 /// 128-bit channel key from the OS-seeded hasher keys plus the clock.
@@ -1230,4 +1514,72 @@ fn random_key() -> [u8; 16] {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Text of every label painted in a frame.
+    fn painted_text(out: &egui::FullOutput) -> Vec<String> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn right_click_on_message_opens_menu() {
+        // Keep App::new away from the real settings directory.
+        unsafe { std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join("mc-ui-test")) };
+        let app = App::new(Arc::new(|| {}));
+        let msg = Message {
+            id: 7,
+            out: false,
+            ts: 1,
+            recv: util::now(),
+            author: "Dave".into(),
+            text: "Anyone on the hill?".into(),
+            status: Status::Received,
+            txt_type: 0,
+            snr: Some(-3.0),
+            path_len: 2,
+            ack: 0,
+            attempt: 0,
+            deadline: None,
+        };
+        let key = ChatKey::Channel([1; 16]);
+        let ctx = egui::Context::default();
+        let mut rect = egui::Rect::NOTHING;
+        let mut frame = |events: Vec<egui::Event>, rect: &mut egui::Rect| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let before = ui.cursor().min;
+                    bubble(ui, &msg, false, true, &app, key);
+                    *rect = egui::Rect::from_min_max(before, egui::pos2(before.x + 120.0, ui.cursor().min.y - 8.0));
+                });
+            })
+        };
+        frame(vec![], &mut rect);
+        let out = frame(vec![], &mut rect);
+        assert!(!painted_text(&out).iter().any(|t| t.contains("Message details")));
+        let p = rect.center();
+        let click = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+        frame(vec![egui::Event::PointerMoved(p), click(true)], &mut rect);
+        frame(vec![click(false)], &mut rect);
+        let out = frame(vec![], &mut rect);
+        let texts = painted_text(&out);
+        for want in ["Copy text", "Reply to Dave", "Message details…", "Block sender 'Dave'…", "Delete message"] {
+            assert!(texts.iter().any(|t| t == want), "menu item {want:?} missing; painted: {texts:?}");
+        }
+        assert!(!texts.iter().any(|t| t == "Send again"), "incoming message must not offer resend");
+    }
 }

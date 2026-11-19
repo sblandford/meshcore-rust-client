@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MeshCore
+GenericName=Mesh radio messenger
+Comment=Chat over MeshCore LoRa companion radios via USB or Bluetooth
+Exec=meshcore
+Icon=io.github.sblandford.MeshCoreClient
+Terminal=false
+Categories=Network;Chat;HamRadio;
+Keywords=MeshCore;LoRa;mesh;radio;off-grid;
+StartupWMClass=io.github.sblandford.MeshCoreClient

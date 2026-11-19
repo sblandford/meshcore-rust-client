@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.sblandford.MeshCoreClient</id>
+  <name>MeshCore</name>
+  <summary>Chat over MeshCore LoRa companion radios</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.sblandford">
+    <name>Simon Blandford</name>
+  </developer>
+  <description>
+    <p>
+      A small, fast native desktop client for MeshCore companion radios. It connects over USB serial
+      or Bluetooth LE and lets you chat on channels and with contacts across an off-grid LoRa mesh.
+    </p>
+    <ul>
+      <li>Public, hashtag and private channels</li>
+      <li>Direct messages with delivery confirmation and automatic retries</li>
+      <li>Room servers, and repeater administration (status, telemetry, remote CLI, trace route)</li>
+      <li>Contact management, sharing links and blocking</li>
+      <li>Node and radio settings</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.sblandford.MeshCoreClient.desktop</launchable>
+  <url type="homepage">https://github.com/sblandford/meshcore-rust-client</url>
+  <url type="bugtracker">https://github.com/sblandford/meshcore-rust-client/issues</url>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+  </categories>
+  <requires>
+    <display_length compare="ge">640</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.0" date="2026-11-19">
+      <description>
+        <p>Installers for Windows, macOS and Linux; right-click menus; blocking; app icon.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-11-18">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

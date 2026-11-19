@@ -150,6 +150,10 @@ pub struct App {
     pub rx_log: VecDeque<LogLine>,
     pub toasts: VecDeque<(String, Instant)>,
     pub settings: Settings,
+    /// Contacts whose direct messages are dropped.
+    pub blocked_keys: Vec<[u8; 32]>,
+    /// Sender names whose channel / room-server posts are dropped.
+    pub blocked_names: Vec<String>,
     pub selected: Option<ChatKey>,
     /// Text placed here should be copied to the clipboard by the UI.
     pub clipboard: Option<String>,
@@ -157,6 +161,19 @@ pub struct App {
 
 impl App {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> App {
+        let mut app = App::build(wake);
+        app.blocked_keys = app
+            .settings
+            .get("blocked_keys")
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|h| util::unhex(h)?.try_into().ok())
+            .collect();
+        app.blocked_names = app.settings.get("blocked_names").unwrap_or("").split('\n').filter(|n| !n.is_empty()).map(str::to_string).collect();
+        app
+    }
+
+    fn build(wake: Arc<dyn Fn() + Send + Sync>) -> App {
         let (events_tx, events) = channel();
         App {
             link: None,
@@ -186,6 +203,8 @@ impl App {
             rx_log: VecDeque::new(),
             toasts: VecDeque::new(),
             settings: Settings::load(),
+            blocked_keys: Vec::new(),
+            blocked_names: Vec::new(),
             selected: None,
             clipboard: None,
         }
@@ -587,6 +606,16 @@ impl App {
         } else {
             (author, m.text.clone())
         };
+        if let ChatKey::Contact(pk) = key {
+            if self.blocked_keys.contains(&pk) {
+                self.note(format!("Dropped message from blocked contact {}", self.name_of(&pk)));
+                return;
+            }
+        }
+        if !author.is_empty() && self.blocked_names.contains(&author) {
+            self.note(format!("Dropped message from blocked sender {author}"));
+            return;
+        }
         // Duplicate suppression (the same message can arrive via several paths).
         if let Some(chat) = self.chats.get(&key) {
             if chat.msgs.iter().rev().take(50).any(|x| !x.out && x.ts == m.timestamp && x.text == text && x.author == author) {
@@ -876,6 +905,77 @@ impl App {
             c.msgs.clear();
             c.unread = 0;
         }
+        self.awaiting_ack.retain(|(k, _)| *k != key);
+        if let Some(s) = &mut self.store {
+            s.clear(&key);
+        }
+    }
+
+    pub fn delete_message(&mut self, key: ChatKey, id: u64) {
+        if let Some(c) = self.chats.get_mut(&key) {
+            c.msgs.retain(|m| m.id != id);
+        }
+        self.awaiting_ack.retain(|e| *e != (key, id));
+        if let Some(s) = &mut self.store {
+            s.delete(id);
+        }
+    }
+
+    pub fn find_message(&self, key: ChatKey, id: u64) -> Option<&Message> {
+        self.msg_ref(key, id)
+    }
+
+    pub fn mark_unread(&mut self, key: ChatKey) {
+        if self.selected == Some(key) {
+            self.selected = None;
+        }
+        if let Some(c) = self.chats.get_mut(&key) {
+            c.unread = c.unread.max(1);
+        }
+    }
+
+    // ------------------------------------------------------------ blocking
+
+    fn save_blocks(&mut self) {
+        let keys: Vec<String> = self.blocked_keys.iter().map(|k| hex(k)).collect();
+        self.settings.set("blocked_keys", &keys.join(","));
+        let names = self.blocked_names.join("\n");
+        self.settings.set("blocked_names", &names);
+    }
+
+    pub fn is_key_blocked(&self, pk: &[u8; 32]) -> bool {
+        self.blocked_keys.contains(pk)
+    }
+
+    pub fn is_name_blocked(&self, name: &str) -> bool {
+        !name.is_empty() && self.blocked_names.iter().any(|n| n == name)
+    }
+
+    pub fn set_key_blocked(&mut self, pk: [u8; 32], block: bool) {
+        self.blocked_keys.retain(|k| *k != pk);
+        if block {
+            self.blocked_keys.push(pk);
+        }
+        self.save_blocks();
+        let name = self.name_of(&pk);
+        self.toast(format!("{name} {}", if block { "blocked" } else { "unblocked" }));
+    }
+
+    pub fn set_name_blocked(&mut self, name: &str, block: bool) {
+        self.blocked_names.retain(|n| n != name);
+        if block {
+            self.blocked_names.push(name.to_string());
+        }
+        self.save_blocks();
+        self.toast(format!("Sender '{name}' {}", if block { "blocked" } else { "unblocked" }));
+    }
+
+    /// Find a contact by its advertised name (for channel/room authors).
+    pub fn contact_by_name(&self, name: &str) -> Option<&Contact> {
+        if name.is_empty() {
+            return None;
+        }
+        self.contacts.iter().find(|c| c.name == name)
     }
 
     // ------------------------------------------------------------ helpers

@@ -1,6 +1,6 @@
 [package]
 name = "meshcore-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight native desktop client for MeshCore companion radios (USB serial and Bluetooth LE)"
 license = "GPL-3.0-only"

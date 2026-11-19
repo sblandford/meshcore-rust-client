@@ -73,10 +73,13 @@ pub type History = HashMap<ChatKey, Vec<Message>>;
 impl Store {
     /// Open (creating if needed) the history for the radio with the given public key.
     pub fn open(pubkey: &[u8; 32]) -> (Store, History, u64) {
-        let path: PathBuf = crate::util::data_dir().join(format!("history-{}.log", hex(&pubkey[..8])));
+        Self::open_path(crate::util::data_dir().join(format!("history-{}.log", hex(&pubkey[..8]))))
+    }
+
+    fn open_path(path: PathBuf) -> (Store, History, u64) {
         let mut hist: History = HashMap::new();
         let mut max_id = 0;
-        let mut index: HashMap<u64, (ChatKey, usize)> = HashMap::new();
+        let mut index: HashMap<u64, ChatKey> = HashMap::new();
         if let Ok(f) = File::open(&path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 let p: Vec<&str> = line.split('\t').collect();
@@ -99,15 +102,24 @@ impl Store {
                             deadline: None,
                         };
                         max_id = max_id.max(id);
-                        let v = hist.entry(key).or_default();
-                        index.insert(id, (key, v.len()));
-                        v.push(m);
+                        index.insert(id, key);
+                        hist.entry(key).or_default().push(m);
                     }
                     Some("S") if p.len() >= 3 => {
-                        if let Some((k, i)) = p[1].parse::<u64>().ok().and_then(|id| index.get(&id)) {
-                            if let Some(m) = hist.get_mut(k).and_then(|v| v.get_mut(*i)) {
-                                m.status = parse_status(p[2]);
-                            }
+                        let Ok(id) = p[1].parse::<u64>() else { continue };
+                        if let Some(m) = index.get(&id).and_then(|k| hist.get_mut(k)).and_then(|v| v.iter_mut().rev().find(|m| m.id == id)) {
+                            m.status = parse_status(p[2]);
+                        }
+                    }
+                    Some("D") if p.len() >= 2 => {
+                        let Ok(id) = p[1].parse::<u64>() else { continue };
+                        if let Some(v) = index.get(&id).and_then(|k| hist.get_mut(k)) {
+                            v.retain(|m| m.id != id);
+                        }
+                    }
+                    Some("C") if p.len() >= 2 => {
+                        if let Some(k) = parse_key(p[1]) {
+                            hist.remove(&k);
                         }
                     }
                     _ => {}
@@ -150,6 +162,16 @@ impl Store {
         ));
     }
 
+    /// Record that one message was deleted.
+    pub fn delete(&mut self, id: u64) {
+        self.write(format!("D\t{id}\n"));
+    }
+
+    /// Record that a conversation's history was cleared.
+    pub fn clear(&mut self, key: &ChatKey) {
+        self.write(format!("C\t{}\n", key_str(key)));
+    }
+
     pub fn set_status(&mut self, id: u64, s: Status) {
         self.write(format!("S\t{id}\t{}\n", status_code(s)));
     }
@@ -189,6 +211,46 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_records_survive_reload() {
+        let path = std::env::temp_dir().join(format!("mc-store-test-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let msg = |id: u64, text: &str| Message {
+            id,
+            out: true,
+            ts: 1,
+            recv: 2,
+            author: "me".into(),
+            text: text.into(),
+            status: Status::Sent,
+            txt_type: 0,
+            snr: None,
+            path_len: 0xFF,
+            ack: 0,
+            attempt: 0,
+            deadline: None,
+        };
+        let (a, b) = (ChatKey::Contact([1; 32]), ChatKey::Channel([2; 16]));
+        {
+            let (mut st, _, _) = Store::open_path(path.clone());
+            st.add(&a, &msg(1, "keep\twith tab"));
+            st.add(&a, &msg(2, "delete me"));
+            st.add(&a, &msg(3, "delivered"));
+            st.set_status(3, Status::Delivered(900));
+            st.delete(2);
+            st.add(&b, &msg(4, "cleared"));
+            st.clear(&b);
+            st.add(&b, &msg(5, "after clear"));
+        }
+        let (_, h, next) = Store::open_path(path.clone());
+        let _ = std::fs::remove_file(&path);
+        let ta: Vec<_> = h[&a].iter().map(|m| (m.id, m.text.as_str(), m.status)).collect();
+        // unacknowledged DM from a previous session is shown as failed
+        assert_eq!(ta, vec![(1, "keep\twith tab", Status::Failed), (3, "delivered", Status::Delivered(900))]);
+        assert_eq!(h[&b].iter().map(|m| m.id).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(next, 6);
+    }
+
     #[test]
     fn escaping() {
         let s = "a\tb\nc\\d";

@@ -216,6 +216,12 @@ pub fn fmt_time(t: u64) -> String {
     }
 }
 
+/// Full local date and time, e.g. "2026-11-19 09:41:07".
+pub fn fmt_full(t: u64) -> String {
+    let l = local(t);
+    format!("{}-{:02}-{:02} {:02}:{:02}:{:02}", l.y, l.mo, l.d, l.h, l.mi, l.s)
+}
+
 pub fn fmt_clock(t: u64) -> String {
     let l = local(t);
     format!("{:02}:{:02}:{:02}", l.h, l.mi, l.s)

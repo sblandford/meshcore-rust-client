@@ -1,0 +1,49 @@
+# Flatpak manifest. Build and install locally from the repository root with:
+#   flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
+#       packaging/linux/io.github.sblandford.MeshCoreClient.yml
+id: io.github.sblandford.MeshCoreClient
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: meshcore
+finish-args:
+  # GUI (Wayland first, X11 fallback) with OpenGL
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # USB serial radios (/dev/ttyACM*, /dev/ttyUSB*); includes GPU access.
+  # Flatpak has no narrower permission for serial ports.
+  - --device=all
+  # Bluetooth LE via BlueZ on the system bus
+  - --system-talk-name=org.bluez
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: meshcore
+    buildsystem: simple
+    build-options:
+      # Crates are fetched by cargo, pinned by Cargo.lock.
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/meshcore/cargo-home
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/meshcore /app/bin/meshcore
+      - install -Dm644 packaging/linux/io.github.sblandford.MeshCoreClient.desktop -t /app/share/applications
+      - install -Dm644 packaging/linux/io.github.sblandford.MeshCoreClient.metainfo.xml -t /app/share/metainfo
+      - |
+        for s in 32 48 64 128 256 512; do
+          install -Dm644 packaging/icons/meshcore-$s.png /app/share/icons/hicolor/${s}x${s}/apps/io.github.sblandford.MeshCoreClient.png
+        done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
+          - .git
+          - dist
