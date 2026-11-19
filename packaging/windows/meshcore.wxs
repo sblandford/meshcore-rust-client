@@ -26,9 +26,15 @@
         <Component Id="MainExecutable">
           <File Id="MeshCoreExe" Source="$(var.Exe)" Name="meshcore.exe" KeyPath="yes" />
         </Component>
-        <Component Id="Documents">
+        <!-- One component per unversioned file, so WiX can generate stable component IDs. -->
+        <Component Id="LicenseDoc">
           <File Id="LicenseFile" Source="$(var.Root)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
-          <File Id="ReadmeFile" Source="$(var.Root)\README.md" Name="README.md" />
+        </Component>
+        <Component Id="ReadmeDoc">
+          <File Id="ReadmeFile" Source="$(var.Root)\README.md" Name="README.md" KeyPath="yes" />
+        </Component>
+        <Component Id="InstallDoc">
+          <File Id="InstallFile" Source="$(var.Root)\INSTALL.md" Name="INSTALL.md" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -47,7 +53,9 @@
 
     <Feature Id="Main" Title="MeshCore" Level="1">
       <ComponentRef Id="MainExecutable" />
-      <ComponentRef Id="Documents" />
+      <ComponentRef Id="LicenseDoc" />
+      <ComponentRef Id="ReadmeDoc" />
+      <ComponentRef Id="InstallDoc" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
