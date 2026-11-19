@@ -118,6 +118,148 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// HMAC-SHA256 (RFC 2104) for keys up to 64 bytes.
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&sha256(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    inner.extend_from_slice(data);
+    let mut outer: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    outer.extend_from_slice(&sha256(&inner));
+    sha256(&outer)
+}
+
+// ---------------------------------------------------------------- AES-128 (FIPS-197)
+
+fn gmul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0;
+    while b != 0 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        let hi = a & 0x80;
+        a <<= 1;
+        if hi != 0 {
+            a ^= 0x1b;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+/// (S-box, inverse S-box), derived from GF(2^8) inversion plus the affine transform.
+fn sboxes() -> &'static ([u8; 256], [u8; 256]) {
+    static T: std::sync::OnceLock<([u8; 256], [u8; 256])> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut s = [0u8; 256];
+        let mut inv = [0u8; 256];
+        for x in 0..256usize {
+            let i = if x == 0 { 0 } else { (1..=255u8).find(|&y| gmul(x as u8, y) == 1).unwrap() };
+            let v = i ^ i.rotate_left(1) ^ i.rotate_left(2) ^ i.rotate_left(3) ^ i.rotate_left(4) ^ 0x63;
+            s[x] = v;
+            inv[v as usize] = x as u8;
+        }
+        (s, inv)
+    })
+}
+
+fn aes128_round_keys(key: &[u8; 16]) -> [[u8; 16]; 11] {
+    let (sb, _) = sboxes();
+    let mut w = [[0u8; 4]; 44];
+    for i in 0..4 {
+        w[i].copy_from_slice(&key[i * 4..i * 4 + 4]);
+    }
+    let mut rcon = 1u8;
+    for i in 4..44 {
+        let mut t = w[i - 1];
+        if i % 4 == 0 {
+            t = [sb[t[1] as usize] ^ rcon, sb[t[2] as usize], sb[t[3] as usize], sb[t[0] as usize]];
+            rcon = gmul(rcon, 2);
+        }
+        for j in 0..4 {
+            w[i][j] = w[i - 4][j] ^ t[j];
+        }
+    }
+    let mut rk = [[0u8; 16]; 11];
+    for (r, k) in rk.iter_mut().enumerate() {
+        for c in 0..4 {
+            k[c * 4..c * 4 + 4].copy_from_slice(&w[r * 4 + c]);
+        }
+    }
+    rk
+}
+
+#[cfg(test)]
+pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
+    let (sb, _) = sboxes();
+    let rk = aes128_round_keys(key);
+    let mut s = *block;
+    for i in 0..16 {
+        s[i] ^= rk[0][i];
+    }
+    for round in 1..=10 {
+        let mut t = [0u8; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                t[r + 4 * c] = sb[s[r + 4 * ((c + r) % 4)] as usize]; // SubBytes + ShiftRows
+            }
+        }
+        if round < 10 {
+            for c in 0..4 {
+                let a = [t[4 * c], t[4 * c + 1], t[4 * c + 2], t[4 * c + 3]];
+                t[4 * c] = gmul(a[0], 2) ^ gmul(a[1], 3) ^ a[2] ^ a[3];
+                t[4 * c + 1] = a[0] ^ gmul(a[1], 2) ^ gmul(a[2], 3) ^ a[3];
+                t[4 * c + 2] = a[0] ^ a[1] ^ gmul(a[2], 2) ^ gmul(a[3], 3);
+                t[4 * c + 3] = gmul(a[0], 3) ^ a[1] ^ a[2] ^ gmul(a[3], 2);
+            }
+        }
+        for i in 0..16 {
+            s[i] = t[i] ^ rk[round][i];
+        }
+    }
+    s
+}
+
+fn aes128_decrypt_block(rk: &[[u8; 16]; 11], block: &[u8]) -> [u8; 16] {
+    let (_, isb) = sboxes();
+    let mut s = [0u8; 16];
+    for i in 0..16 {
+        s[i] = block[i] ^ rk[10][i];
+    }
+    for round in (0..10).rev() {
+        let mut t = [0u8; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                t[r + 4 * ((c + r) % 4)] = isb[s[r + 4 * c] as usize]; // InvShiftRows + InvSubBytes
+            }
+        }
+        for i in 0..16 {
+            t[i] ^= rk[round][i];
+        }
+        if round > 0 {
+            for c in 0..4 {
+                let a = [t[4 * c], t[4 * c + 1], t[4 * c + 2], t[4 * c + 3]];
+                t[4 * c] = gmul(a[0], 14) ^ gmul(a[1], 11) ^ gmul(a[2], 13) ^ gmul(a[3], 9);
+                t[4 * c + 1] = gmul(a[0], 9) ^ gmul(a[1], 14) ^ gmul(a[2], 11) ^ gmul(a[3], 13);
+                t[4 * c + 2] = gmul(a[0], 13) ^ gmul(a[1], 9) ^ gmul(a[2], 14) ^ gmul(a[3], 11);
+                t[4 * c + 3] = gmul(a[0], 11) ^ gmul(a[1], 13) ^ gmul(a[2], 9) ^ gmul(a[3], 14);
+            }
+        }
+        s = t;
+    }
+    s
+}
+
+/// AES-128 in ECB mode, as MeshCore uses for packet payloads (input is whole blocks).
+pub fn aes128_ecb_decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let rk = aes128_round_keys(key);
+    data.chunks_exact(16).flat_map(|b| aes128_decrypt_block(&rk, b)).collect()
+}
+
 /// Secret for a public "#hashtag" channel: first 16 bytes of SHA-256 of the name (including '#').
 pub fn hashtag_secret(name: &str) -> [u8; 16] {
     sha256(name.as_bytes())[..16].try_into().unwrap()
@@ -284,6 +426,18 @@ mod tests {
         assert_eq!(hex(&sha256(b"")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         let long = vec![b'a'; 1000];
         assert_eq!(hex(&sha256(&long)), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+    }
+
+    #[test]
+    fn aes_and_hmac_vectors() {
+        // FIPS-197 appendix C.1
+        let key: [u8; 16] = unhex("000102030405060708090a0b0c0d0e0f").unwrap().try_into().unwrap();
+        let pt: [u8; 16] = unhex("00112233445566778899aabbccddeeff").unwrap().try_into().unwrap();
+        let ct = aes128_encrypt_block(&key, &pt);
+        assert_eq!(hex(&ct), "69c4e0d86a7b0430d8cdb78070b4c55a");
+        assert_eq!(aes128_ecb_decrypt(&key, &ct), pt.to_vec());
+        // RFC 4231 test case 2
+        assert_eq!(hex(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
     }
 
     #[test]

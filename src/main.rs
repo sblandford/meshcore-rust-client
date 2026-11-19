@@ -1,5 +1,5 @@
-//! MeshCore desktop client: a small native app for MeshCore companion radios
-//! over USB serial or Bluetooth LE.
+//! Rust Desktop Client for MeshCore: a small, independent native app for MeshCore
+//! companion radios over USB serial or Bluetooth LE.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -9,6 +9,13 @@ mod proto;
 mod store;
 mod ui;
 mod util;
+
+/// User-visible application name. "MeshCore" is used only to say what the app works with.
+pub const APP_NAME: &str = "Rust Desktop Client for MeshCore";
+/// Shown wherever the app is presented, so it is never mistaken for the official app.
+pub const DISCLAIMER: &str = "Independent open-source software, compatible with MeshCore radios. \
+Not affiliated with or endorsed by the MeshCore project.";
+pub const SOURCE_URL: &str = "https://github.com/sblandford/meshcore-rust-client";
 
 /// `--scan`: list serial ports and MeshCore BLE radios on the console (diagnostics).
 fn scan_cli() {
@@ -82,13 +89,27 @@ fn probe_cli(arg: &str, pin: u32) {
         if let Some(proto::Frame::SelfInfo(s)) = next(&|f| matches!(f, proto::Frame::SelfInfo(_))) {
             println!("SELF: name={} key={} freq={} kHz bw={} Hz sf={} cr={} tx={} dBm", s.name, util::hex(&s.pubkey[..8]), s.freq_khz, s.bw_hz, s.sf, s.cr, s.tx_power);
         }
+        for (label, code) in [
+            ("AUTO-ADD", proto::CMD_GET_AUTOADD_CONFIG),
+            ("TUNING", proto::CMD_GET_TUNING_PARAMS),
+            ("REGION", proto::CMD_GET_DEFAULT_FLOOD_SCOPE),
+            ("SENSORS", proto::CMD_GET_CUSTOM_VARS),
+            ("REPEAT FREQS", proto::CMD_GET_ALLOWED_REPEAT_FREQ),
+            ("CLOCK", proto::CMD_GET_DEVICE_TIME),
+        ] {
+            link.send(proto::simple(code));
+            let r = next(&|f| !matches!(f, proto::Frame::LogRx { .. } | proto::Frame::MsgWaiting | proto::Frame::Advert(_) | proto::Frame::NewAdvert(_)));
+            println!("{label}: {r:?}");
+        }
         link.send(proto::simple(proto::CMD_GET_BATT_AND_STORAGE));
         println!("BATT: {:?}", next(&|f| matches!(f, proto::Frame::Batt { .. })));
+        let mut channels = Vec::new();
         for i in 0..d.max_channels {
             link.send(proto::get_channel(i));
-            if let Some(proto::Frame::ChannelInfo { idx, name, .. }) = next(&|f| matches!(f, proto::Frame::ChannelInfo { .. } | proto::Frame::Err(_))) {
+            if let Some(proto::Frame::ChannelInfo { idx, name, secret }) = next(&|f| matches!(f, proto::Frame::ChannelInfo { .. } | proto::Frame::Err(_))) {
                 if !name.is_empty() {
                     println!("CHANNEL {idx}: {name}");
+                    channels.push((name, secret));
                 }
             }
         }
@@ -106,6 +127,29 @@ fn probe_cli(arg: &str, pin: u32) {
             }
         }
         println!("{n} contacts");
+        // Listen to overheard traffic and check channel packets decrypt (counts only, no content).
+        let secs = std::env::var("MC_PROBE_LISTEN").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
+        if secs > 0 {
+            println!("Listening for {secs} s…");
+            let (mut total, mut grp, mut ok) = (0, 0, 0);
+            let mut per: std::collections::BTreeMap<String, u32> = Default::default();
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if let Ok(LinkEvent::Frame(f)) = rx.recv_timeout(Duration::from_millis(500)) {
+                    if let Some(proto::Frame::LogRx { raw, .. }) = proto::parse(&f) {
+                        total += 1;
+                        if let Some(p) = proto::parse_raw(&raw).filter(|p| p.payload_type == proto::PAYLOAD_GRP_TXT) {
+                            grp += 1;
+                            if let Some((name, _)) = channels.iter().find(|(_, s)| proto::decrypt_group_text(p.payload, s).is_some()) {
+                                ok += 1;
+                                *per.entry(name.clone()).or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            println!("Heard {total} packets: {grp} channel posts, {ok} decrypted with your channel keys {per:?}");
+        }
     }
     drop(link);
     std::thread::sleep(Duration::from_secs(2));
@@ -124,7 +168,7 @@ fn main() -> eframe::Result<()> {
     }
     let mut opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("MeshCore")
+            .with_title(APP_NAME)
             // Must match the .desktop file / Flatpak ID so desktops show the right icon.
             .with_app_id("io.github.sblandford.MeshCoreClient")
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../packaging/icons/meshcore-256.png")).unwrap_or_default())
@@ -135,5 +179,5 @@ fn main() -> eframe::Result<()> {
     // egui repaints only on demand, so vsync buys nothing here; it also makes the
     // GL swap block forever on some Wayland compositors (seen on KDE Plasma).
     opts.glow_options.vsync = false;
-    eframe::run_native("MeshCore", opts, Box::new(|cc| Ok(Box::new(ui::Gui::new(cc)))))
+    eframe::run_native(APP_NAME, opts, Box::new(|cc| Ok(Box::new(ui::Gui::new(cc)))))
 }

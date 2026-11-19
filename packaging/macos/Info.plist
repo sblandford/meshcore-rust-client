@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>MeshCore</string>
-  <key>CFBundleDisplayName</key><string>MeshCore</string>
+  <key>CFBundleName</key><string>Rust Desktop Client for MeshCore</string>
+  <key>CFBundleDisplayName</key><string>Rust Desktop Client for MeshCore</string>
   <key>CFBundleIdentifier</key><string>io.github.sblandford.MeshCoreClient</string>
-  <key>CFBundleExecutable</key><string>meshcore</string>
+  <key>CFBundleExecutable</key><string>meshcore-rust-client</string>
   <key>CFBundleIconFile</key><string>meshcore</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>@VERSION@</string>
@@ -14,7 +14,7 @@
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.social-networking</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSHumanReadableCopyright</key><string>GNU General Public License v3</string>
-  <key>NSBluetoothAlwaysUsageDescription</key><string>MeshCore connects to your companion radio over Bluetooth.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © Simon Blandford. GNU GPL v3. Independent client, not affiliated with or endorsed by the MeshCore project.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>This app connects to your MeshCore companion radio over Bluetooth.</string>
 </dict>
 </plist>

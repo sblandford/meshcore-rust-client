@@ -39,6 +39,35 @@ pub const CMD_SET_OTHER_PARAMS: u8 = 38;
 pub const CMD_SEND_TELEMETRY_REQ: u8 = 39;
 pub const CMD_SEND_PATH_DISCOVERY_REQ: u8 = 52;
 pub const CMD_GET_STATS: u8 = 56;
+pub const CMD_GET_DEVICE_TIME: u8 = 5;
+pub const CMD_SET_TUNING_PARAMS: u8 = 21;
+pub const CMD_EXPORT_PRIVATE_KEY: u8 = 23;
+pub const CMD_IMPORT_PRIVATE_KEY: u8 = 24;
+pub const CMD_GET_CONTACT_BY_KEY: u8 = 30;
+pub const CMD_GET_CUSTOM_VARS: u8 = 40;
+pub const CMD_SET_CUSTOM_VAR: u8 = 41;
+pub const CMD_GET_ADVERT_PATH: u8 = 42;
+pub const CMD_GET_TUNING_PARAMS: u8 = 43;
+pub const CMD_SEND_BINARY_REQ: u8 = 50;
+pub const CMD_FACTORY_RESET: u8 = 51;
+pub const CMD_SET_AUTOADD_CONFIG: u8 = 58;
+pub const CMD_GET_AUTOADD_CONFIG: u8 = 59;
+pub const CMD_GET_ALLOWED_REPEAT_FREQ: u8 = 60;
+pub const CMD_SET_PATH_HASH_MODE: u8 = 61;
+pub const CMD_SET_DEFAULT_FLOOD_SCOPE: u8 = 63;
+pub const CMD_GET_DEFAULT_FLOOD_SCOPE: u8 = 64;
+pub const CMD_RUN_CLI_COMMAND: u8 = 66;
+
+/// Auto-add configuration bits (CMD_SET_AUTOADD_CONFIG).
+pub const AUTOADD_OVERWRITE_OLDEST: u8 = 1 << 0;
+pub const AUTOADD_CHAT: u8 = 1 << 1;
+pub const AUTOADD_REPEATER: u8 = 1 << 2;
+pub const AUTOADD_ROOM: u8 = 1 << 3;
+pub const AUTOADD_SENSOR: u8 = 1 << 4;
+
+/// Request types for CMD_SEND_BINARY_REQ to repeaters / room servers.
+pub const REQ_GET_NEIGHBOURS: u8 = 0x06;
+pub const REQ_GET_OWNER_INFO: u8 = 0x07;
 
 // ---- responses ----
 pub const RESP_OK: u8 = 0;
@@ -60,6 +89,15 @@ pub const RESP_CHANNEL_MSG_V3: u8 = 17;
 pub const RESP_CHANNEL_INFO: u8 = 18;
 pub const RESP_STATS: u8 = 24;
 pub const RESP_CHANNEL_DATA: u8 = 27;
+pub const RESP_CURR_TIME: u8 = 9;
+pub const RESP_PRIVATE_KEY: u8 = 14;
+pub const RESP_CUSTOM_VARS: u8 = 21;
+pub const RESP_ADVERT_PATH: u8 = 22;
+pub const RESP_TUNING_PARAMS: u8 = 23;
+pub const RESP_AUTOADD_CONFIG: u8 = 25;
+pub const RESP_ALLOWED_REPEAT_FREQ: u8 = 26;
+pub const RESP_DEFAULT_FLOOD_SCOPE: u8 = 28;
+pub const RESP_CLI_REPLY: u8 = 29;
 
 // ---- pushes (radio -> app, unsolicited) ----
 pub const PUSH_ADVERT: u8 = 0x80;
@@ -76,6 +114,7 @@ pub const PUSH_TELEMETRY_RESPONSE: u8 = 0x8B;
 pub const PUSH_PATH_DISCOVERY_RESPONSE: u8 = 0x8D;
 pub const PUSH_CONTACT_DELETED: u8 = 0x8F;
 pub const PUSH_CONTACTS_FULL: u8 = 0x90;
+pub const PUSH_BINARY_RESPONSE: u8 = 0x8C;
 
 pub const TXT_PLAIN: u8 = 0;
 pub const TXT_CLI_DATA: u8 = 1;
@@ -126,6 +165,10 @@ pub struct DeviceInfo {
     pub build_date: String,
     pub model: String,
     pub version: String,
+    /// Client repeat mode (firmware protocol v9+).
+    pub repeat: Option<bool>,
+    /// Path hash mode: hash size is mode + 1 bytes (v10+).
+    pub path_hash_mode: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -220,6 +263,16 @@ pub enum Frame {
     DeviceInfo(DeviceInfo),
     ChannelInfo { idx: u8, name: String, secret: [u8; 16] },
     Stats(u8, Vec<u8>),
+    CurrTime(u32),
+    PrivateKey(Vec<u8>),
+    CustomVars(String),
+    AdvertPath { ts: u32, path: Vec<u8>, hash_size: usize },
+    Tuning { rx_delay: u32, airtime: u32 },
+    AutoAdd { config: u8, max_hops: u8 },
+    RepeatFreqs(Vec<(u32, u32)>),
+    DefaultScope(Option<(String, [u8; 16])>),
+    CliReply(String),
+    BinaryResponse { tag: u32, data: Vec<u8> },
     // pushes
     Advert([u8; 32]),
     PathUpdated([u8; 32]),
@@ -376,10 +429,35 @@ pub fn parse(b: &[u8]) -> Option<Frame> {
                 build_date: r.cstr(12).unwrap_or_default(),
                 model: r.cstr(40).unwrap_or_default(),
                 version: r.cstr(20).unwrap_or_default(),
+                repeat: r.u8().map(|v| v != 0),
+                path_hash_mode: r.u8(),
             })
         }
         RESP_CHANNEL_INFO => Frame::ChannelInfo { idx: r.u8()?, name: r.cstr(32)?, secret: r.arr()? },
         RESP_STATS => Frame::Stats(r.u8()?, r.rest().to_vec()),
+        RESP_CURR_TIME => Frame::CurrTime(r.u32()?),
+        RESP_PRIVATE_KEY => Frame::PrivateKey(r.rest().to_vec()),
+        RESP_CUSTOM_VARS => Frame::CustomVars(String::from_utf8_lossy(r.rest()).trim_end_matches('\0').to_string()),
+        RESP_ADVERT_PATH => {
+            let ts = r.u32()?;
+            let pl = r.u8()?;
+            let (n, sz) = path_dims(pl);
+            Frame::AdvertPath { ts, path: r.bytes(n * sz)?.to_vec(), hash_size: sz }
+        }
+        RESP_TUNING_PARAMS => Frame::Tuning { rx_delay: r.u32()?, airtime: r.u32()? },
+        RESP_AUTOADD_CONFIG => Frame::AutoAdd { config: r.u8()?, max_hops: r.u8().unwrap_or(0) },
+        RESP_ALLOWED_REPEAT_FREQ => {
+            let mut v = Vec::new();
+            while let (Some(a), Some(b)) = (r.u32(), r.u32()) {
+                v.push((a, b));
+            }
+            Frame::RepeatFreqs(v)
+        }
+        RESP_DEFAULT_FLOOD_SCOPE => match (r.cstr(31), r.arr::<16>()) {
+            (Some(n), Some(k)) if !n.is_empty() => Frame::DefaultScope(Some((n, k))),
+            _ => Frame::DefaultScope(None),
+        },
+        RESP_CLI_REPLY => Frame::CliReply(String::from_utf8_lossy(r.rest()).trim_end_matches('\0').to_string()),
         PUSH_ADVERT => Frame::Advert(r.arr()?),
         PUSH_PATH_UPDATED => Frame::PathUpdated(r.arr()?),
         PUSH_SEND_CONFIRMED => Frame::SendConfirmed { ack: r.u32()?, rtt_ms: r.u32().unwrap_or(0) },
@@ -427,6 +505,10 @@ pub fn parse(b: &[u8]) -> Option<Frame> {
         }
         PUSH_CONTACT_DELETED => Frame::ContactDeleted(r.arr()?),
         PUSH_CONTACTS_FULL => Frame::ContactsFull,
+        PUSH_BINARY_RESPONSE => {
+            r.u8()?;
+            Frame::BinaryResponse { tag: r.u32()?, data: r.rest().to_vec() }
+        }
         c => Frame::Other(c),
     })
 }
@@ -578,6 +660,154 @@ pub fn reboot() -> Vec<u8> {
     v.extend_from_slice(b"reboot");
     v
 }
+pub fn set_radio_repeat(freq_khz: u32, bw_hz: u32, sf: u8, cr: u8, repeat: bool) -> Vec<u8> {
+    let mut v = set_radio(freq_khz, bw_hz, sf, cr);
+    v.push(repeat as u8);
+    v
+}
+pub fn set_tuning(rx_delay_x1000: u32, airtime_x1000: u32) -> Vec<u8> {
+    let mut v = cmd(CMD_SET_TUNING_PARAMS);
+    v.extend_from_slice(&rx_delay_x1000.to_le_bytes());
+    v.extend_from_slice(&airtime_x1000.to_le_bytes());
+    v
+}
+pub fn set_autoadd(config: u8, max_hops: u8) -> Vec<u8> {
+    vec![CMD_SET_AUTOADD_CONFIG, config, max_hops]
+}
+pub fn set_path_hash_mode(mode: u8) -> Vec<u8> {
+    vec![CMD_SET_PATH_HASH_MODE, 0, mode]
+}
+/// Set (or clear, with `None`) the default region / flood scope.
+pub fn set_default_scope(scope: Option<(&str, &[u8; 16])>) -> Vec<u8> {
+    let mut v = cmd(CMD_SET_DEFAULT_FLOOD_SCOPE);
+    if let Some((name, key)) = scope {
+        let mut n = [0u8; 31];
+        let nb = truncate_utf8(name, 30).as_bytes();
+        n[..nb.len()].copy_from_slice(nb);
+        v.extend_from_slice(&n);
+        v.extend_from_slice(key);
+    }
+    v
+}
+pub fn set_custom_var(name: &str, value: &str) -> Vec<u8> {
+    let mut v = cmd(CMD_SET_CUSTOM_VAR);
+    v.extend_from_slice(format!("{name}:{value}").as_bytes());
+    v
+}
+pub fn get_advert_path(pubkey: &[u8; 32]) -> Vec<u8> {
+    let mut v = vec![CMD_GET_ADVERT_PATH, 0];
+    v.extend_from_slice(pubkey);
+    v
+}
+pub fn binary_req(pubkey: &[u8; 32], data: &[u8]) -> Vec<u8> {
+    let mut v = with_key(CMD_SEND_BINARY_REQ, pubkey);
+    v.extend_from_slice(data);
+    v
+}
+/// Ask a repeater for up to `count` neighbours, strongest first, with 4-byte key prefixes.
+pub fn neighbours_req(pubkey: &[u8; 32], count: u8) -> Vec<u8> {
+    let r = crate::util::rand_u32().to_le_bytes();
+    binary_req(pubkey, &[REQ_GET_NEIGHBOURS, 0, count, 0, 0, 2, 4, r[0], r[1], r[2], r[3]])
+}
+pub fn owner_req(pubkey: &[u8; 32]) -> Vec<u8> {
+    let r = crate::util::rand_u32().to_le_bytes();
+    binary_req(pubkey, &[REQ_GET_OWNER_INFO, r[0], r[1], r[2], r[3]])
+}
+pub fn self_telemetry_req() -> Vec<u8> {
+    vec![CMD_SEND_TELEMETRY_REQ, 0, 0, 0]
+}
+pub fn import_private_key(key: &[u8; 64]) -> Vec<u8> {
+    let mut v = cmd(CMD_IMPORT_PRIVATE_KEY);
+    v.extend_from_slice(key);
+    v
+}
+pub fn factory_reset() -> Vec<u8> {
+    let mut v = cmd(CMD_FACTORY_RESET);
+    v.extend_from_slice(b"reset");
+    v
+}
+pub fn run_cli(text: &str) -> Vec<u8> {
+    let mut v = cmd(CMD_RUN_CLI_COMMAND);
+    v.extend_from_slice(text.as_bytes());
+    v
+}
+/// Contact update carrying a manually chosen route (`None` = flood).
+pub fn set_contact_path(c: &Contact, path: Option<(&[u8], usize)>) -> Vec<u8> {
+    let mut c = c.clone();
+    match path {
+        None => c.out_path_len = OUT_PATH_UNKNOWN,
+        Some((bytes, sz)) => {
+            c.out_path = [0; 64];
+            c.out_path[..bytes.len()].copy_from_slice(bytes);
+            c.out_path_len = (((sz - 1) as u8) << 6) | (bytes.len() / sz) as u8;
+        }
+    }
+    update_contact(&c)
+}
+
+/// One neighbour from a REQ_GET_NEIGHBOURS reply.
+#[derive(Clone, Debug)]
+pub struct Neighbour {
+    pub prefix: Vec<u8>,
+    pub heard_secs_ago: u32,
+    pub snr: f32,
+}
+
+/// Decode a neighbours reply: total count, then (prefix, secs ago, snr) entries.
+pub fn decode_neighbours(d: &[u8], prefix_len: usize) -> Option<(u16, Vec<Neighbour>)> {
+    let mut r = Rd::new(d);
+    let total = r.u16()?;
+    let n = r.u16()?;
+    let mut v = Vec::new();
+    for _ in 0..n {
+        v.push(Neighbour { prefix: r.bytes(prefix_len)?.to_vec(), heard_secs_ago: r.u32()?, snr: r.u8()? as i8 as f32 / 4.0 });
+    }
+    Some((total, v))
+}
+
+/// An over-the-air packet as reported by PUSH_LOG_RX_DATA.
+#[derive(Debug)]
+pub struct RawPacket<'a> {
+    pub payload_type: u8,
+    pub hash_size: usize,
+    /// Hashes of the nodes that relayed the packet so far (flood routing), in order.
+    pub path: &'a [u8],
+    pub payload: &'a [u8],
+}
+
+pub const PAYLOAD_TXT_MSG: u8 = 2;
+pub const PAYLOAD_GRP_TXT: u8 = 5;
+
+pub fn parse_raw(raw: &[u8]) -> Option<RawPacket<'_>> {
+    let h = *raw.first()?;
+    let route = h & 3;
+    let mut i = 1 + if route == 0 || route == 3 { 4 } else { 0 }; // transport codes
+    let pl = *raw.get(i)?;
+    i += 1;
+    let (n, sz) = path_dims(pl);
+    let path = raw.get(i..i + n * sz)?;
+    Some(RawPacket { payload_type: (h >> 2) & 15, hash_size: sz, path, payload: raw.get(i + n * sz..)? })
+}
+
+/// Try to decrypt a group-channel text packet payload with a channel secret.
+/// Returns (sender timestamp, "name: text").
+pub fn decrypt_group_text(payload: &[u8], secret: &[u8; 16]) -> Option<(u32, String)> {
+    let hash = crate::util::sha256(secret)[0];
+    if payload.len() < 3 + 16 || payload[0] != hash || (payload.len() - 3) % 16 != 0 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(secret);
+    let cipher = &payload[3..];
+    if crate::util::hmac_sha256(&key, cipher)[..2] != payload[1..3] {
+        return None;
+    }
+    let plain = crate::util::aes128_ecb_decrypt(secret, cipher);
+    let ts = u32::from_le_bytes(plain.get(0..4)?.try_into().ok()?);
+    let text = cstr(plain.get(5..)?);
+    Some((ts, text))
+}
+
 pub fn get_stats(kind: u8) -> Vec<u8> {
     vec![CMD_GET_STATS, kind]
 }
@@ -769,7 +999,7 @@ pub fn decode_lpp(d: &[u8]) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]
@@ -835,6 +1065,65 @@ mod tests {
         f.extend_from_slice(&[0x5a, 0x22, 0x5a, 36, 28, 0xF8, 40]);
         let Some(Frame::Trace { tag, hashes, snrs, final_snr, .. }) = parse(&f) else { panic!() };
         assert_eq!((tag, hashes, snrs, final_snr), (7, vec![0x5a, 0x22, 0x5a], vec![36, 28, -8], 10.0));
+    }
+
+    /// Build a group-text payload exactly as the firmware does (hash, 2-byte HMAC, AES-128-ECB).
+    pub fn make_group_payload(secret: &[u8; 16], ts: u32, text: &str) -> Vec<u8> {
+        let mut plain = ts.to_le_bytes().to_vec();
+        plain.push(0);
+        plain.extend_from_slice(text.as_bytes());
+        while plain.len() % 16 != 0 {
+            plain.push(0);
+        }
+        let cipher: Vec<u8> = plain.chunks(16).flat_map(|b| crate::util::aes128_encrypt_block(secret, b.try_into().unwrap())).collect();
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(secret);
+        let mac = crate::util::hmac_sha256(&key, &cipher);
+        let mut p = vec![crate::util::sha256(secret)[0], mac[0], mac[1]];
+        p.extend(cipher);
+        p
+    }
+
+    #[test]
+    fn group_text_decrypts_and_rejects_wrong_key() {
+        let secret = crate::util::hashtag_secret("#test");
+        let p = make_group_payload(&secret, 1234, "Desk Node: hello mesh");
+        assert_eq!(decrypt_group_text(&p, &secret), Some((1234, "Desk Node: hello mesh".to_string())));
+        assert_eq!(decrypt_group_text(&p, &crate::util::hashtag_secret("#other")), None);
+        let mut bad = p.clone();
+        *bad.last_mut().unwrap() ^= 1; // tampered ciphertext fails the MAC
+        assert_eq!(decrypt_group_text(&bad, &secret), None);
+    }
+
+    #[test]
+    fn raw_packet_with_transport_codes() {
+        // header: GRP_TXT (5) with T-flood route (0) -> 4 transport-code bytes before path_len
+        let raw = [5 << 2, 1, 2, 3, 4, 0x42, 0xAA, 0xBB, 0x01, 0x02, 0x09];
+        let p = parse_raw(&raw).unwrap();
+        // path_len 0x42: hash size 2, 2 hops
+        assert_eq!((p.payload_type, p.hash_size, p.path, p.payload), (5, 2, &[0xAA, 0xBB, 0x01, 0x02][..], &[0x09][..]));
+    }
+
+    #[test]
+    fn new_reply_frames() {
+        let mut f = vec![RESP_ADVERT_PATH];
+        f.extend_from_slice(&99u32.to_le_bytes());
+        f.extend_from_slice(&[2, 0x5a, 0x7c]);
+        assert!(matches!(parse(&f), Some(Frame::AdvertPath { ts: 99, ref path, hash_size: 1 }) if path == &vec![0x5a, 0x7c]));
+        assert!(matches!(parse(&[RESP_AUTOADD_CONFIG, 0x07, 3]), Some(Frame::AutoAdd { config: 7, max_hops: 3 })));
+        let mut n = Vec::new();
+        n.extend_from_slice(&5u16.to_le_bytes());
+        n.extend_from_slice(&1u16.to_le_bytes());
+        n.extend_from_slice(&[1, 2, 3, 4]);
+        n.extend_from_slice(&60u32.to_le_bytes());
+        n.push(0xF4); // -3 dB
+        let (total, list) = decode_neighbours(&n, 4).unwrap();
+        assert_eq!((total, list.len(), list[0].heard_secs_ago, list[0].snr), (5, 1, 60, -3.0));
+        let mut d = vec![RESP_DEVICE_INFO, 13, 175, 40];
+        d.extend_from_slice(&[0; 4 + 12 + 40 + 20]);
+        d.extend_from_slice(&[1, 2]);
+        let Some(Frame::DeviceInfo(i)) = parse(&d) else { panic!() };
+        assert_eq!((i.repeat, i.path_hash_mode), (Some(true), Some(2)));
     }
 
     #[test]

@@ -34,13 +34,13 @@ BEGIN
   BEGIN
     BLOCK "080904b0"
     BEGIN
-      VALUE "CompanyName", "MeshCore desktop client"
-      VALUE "FileDescription", "MeshCore desktop client"
+      VALUE "CompanyName", "Simon Blandford"
+      VALUE "FileDescription", "Rust Desktop Client for MeshCore"
       VALUE "FileVersion", "{ver}"
-      VALUE "InternalName", "meshcore"
-      VALUE "LegalCopyright", "GNU GPL v3"
-      VALUE "OriginalFilename", "meshcore.exe"
-      VALUE "ProductName", "MeshCore"
+      VALUE "InternalName", "meshcore-rust-client"
+      VALUE "LegalCopyright", "Copyright (C) Simon Blandford. GNU GPL v3."
+      VALUE "OriginalFilename", "meshcore-rust-client.exe"
+      VALUE "ProductName", "Rust Desktop Client for MeshCore"
       VALUE "ProductVersion", "{ver}"
     END
   END

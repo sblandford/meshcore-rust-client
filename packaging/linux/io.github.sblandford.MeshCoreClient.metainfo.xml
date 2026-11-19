@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>io.github.sblandford.MeshCoreClient</id>
-  <name>MeshCore</name>
-  <summary>Chat over MeshCore LoRa companion radios</summary>
+  <name>Rust Desktop Client for MeshCore</name>
+  <summary>Independent client for MeshCore LoRa companion radios</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <developer id="io.github.sblandford">
@@ -12,6 +12,10 @@
     <p>
       A small, fast native desktop client for MeshCore companion radios. It connects over USB serial
       or Bluetooth LE and lets you chat on channels and with contacts across an off-grid LoRa mesh.
+    </p>
+    <p>
+      This is independent open-source software. It is not affiliated with or endorsed by the MeshCore project;
+      "MeshCore" is used only to identify the radios it works with.
     </p>
     <ul>
       <li>Public, hashtag and private channels</li>
@@ -37,6 +41,14 @@
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-11-19">
+      <description>
+        <p>Renamed to Rust Desktop Client for MeshCore. Shows which repeaters re-broadcast your messages, adds
+        repeater ping, neighbour list and owner info, contact auto-add settings (including overwrite oldest when
+        full), discovered nodes, manual routes, more radio and device settings, an About window and third-party
+        licence notices.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-11-19">
       <description>
         <p>Installers for Windows, macOS and Linux; right-click menus; blocking; app icon.</p>

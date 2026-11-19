@@ -1,7 +1,11 @@
-# MeshCore desktop client
+# Rust Desktop Client for MeshCore
 
 A small, fast native desktop client for [MeshCore](https://github.com/meshcore-dev/MeshCore)
 companion radios. It runs on Linux, Windows and macOS, and connects over **USB serial** or **Bluetooth LE**.
+
+> **Independent project.** This is open-source software compatible with MeshCore radios. It is not affiliated
+> with or endorsed by the MeshCore project, and is not the official MeshCore app. "MeshCore" is used only to
+> identify the radios it works with.
 
 ## Features
 
@@ -10,14 +14,27 @@ companion radios. It runs on Linux, Windows and macOS, and connects over **USB s
 - **Direct messages:** delivery tracking (sent ✓, delivered ✓✓ with round-trip time). Unacknowledged messages
   are retried automatically up to three times; the path is reset before the last attempt so it is flooded.
   Failed messages can be sent again.
+- **Repeats:** your sent messages show how many relays were heard re-broadcasting them, with each relay's name
+  and SNR. Channel posts are matched exactly by decrypting the overheard packets with your channel keys.
 - **Room servers:** log in, read posts attributed to their original author, and post.
 - **Repeaters:** log in as admin, remote CLI console, status (battery, noise floor, packet counters, airtime, uptime and so on),
-  telemetry, trace route (out and back, with per-hop SNR) and path discovery.
-- **Contacts:** list with type filter, search, favourites and last-heard time. Reset path, share by zero-hop advert,
-  copy or import `meshcore://` contact links, copy the public key, remove.
+  telemetry, **ping** (round-trip time and SNR both ways), trace route (out and back, with per-hop SNR),
+  neighbour list, owner info and path discovery.
+- **Contacts:** list with type filter, search, favourites and last-heard time. Reset path, set a route manually,
+  see which route the last advert arrived by, share by zero-hop advert, copy or import `meshcore://` contact
+  links, copy the public key, remove.
+- **Discovered nodes:** nodes heard advertising but not added (manual mode, hop limit or full list) are listed
+  separately and can be added with one click.
+- **Contact auto-add:** add every node, or only chosen types; overwrite the oldest non-favourite contact when the
+  list is full; limit auto-adding by hop count.
 - **Node settings:** name, location, location in adverts, manual contact adding, telemetry sharing, extra ACKs.
-- **Radio settings:** frequency, bandwidth, spreading factor, coding rate, TX power.
-- **Device:** model and firmware, battery, storage, core/radio/packet statistics, clock sync, BLE PIN, reboot.
+- **Radio settings:** frequency, bandwidth, spreading factor, coding rate, TX power, client repeat mode,
+  path hash size, region (flood scope) and advanced tuning (receive delay, airtime factor).
+- **Device:** model and firmware, battery, storage, core/radio/packet statistics, clock check and sync, the
+  radio's own telemetry, sensor settings (such as GPS), local command console (firmware v1.18+), BLE PIN,
+  private key export and import, reboot and factory reset.
+- **Alerts:** messages that mention you (`@[your name]`) are highlighted, and the taskbar flashes when a message
+  arrives while the window is in the background.
 - **Right-click menus:**
   - Messages: copy, reply (`@[name]`), send again, message details (times, route, SNR, delivery and round trip),
     message the author directly, block the sender, delete.
@@ -42,7 +59,7 @@ Portable archives are also provided. See **[INSTALL.md](INSTALL.md)** for step-b
 ## Building
 
 ```sh
-cargo build --release        # binary: target/release/meshcore (~7 MB, stripped)
+cargo build --release        # binary: target/release/meshcore-rust-client (~7 MB, stripped)
 ```
 
 You need Rust 1.92 or newer. There are no system library build dependencies on any platform. On Linux, X11/Wayland
@@ -73,14 +90,29 @@ itself are all implemented in-tree.
 ## Diagnostics
 
 ```sh
-meshcore --scan                      # list serial ports and MeshCore BLE radios
-meshcore --probe /dev/ttyACM0        # read-only connection test (device info, channels, contacts)
-meshcore --probe <BLE id> [PIN]      # BLE id as shown by --scan
+meshcore-rust-client --scan                      # list serial ports and MeshCore BLE radios
+meshcore-rust-client --probe /dev/ttyACM0        # read-only connection test (device info, channels, contacts)
+meshcore-rust-client --probe <BLE id> [PIN]      # BLE id as shown by --scan
 ```
 
 `tools/radio_sim.py` simulates a companion radio on a pseudo-terminal. It prints the pty path, which you can pass
 to `--probe`; the GUI's port list only shows USB devices. Use it to try the client without hardware.
 
+## Radio regulations
+
+The app lets you set any frequency and transmit power your radio supports. You are responsible for using
+settings (frequency, power and duty cycle) that are legal where you are.
+
+## Acknowledgements
+
+The companion-radio protocol is implemented from the [MeshCore firmware](https://github.com/meshcore-dev/MeshCore)
+(MIT licence, © Scott Powell / rippleradios.com) and [meshcore.js](https://github.com/meshcore-dev/meshcore.js)
+(MIT licence). Thanks to the MeshCore developers and community.
+
 ## Licence
 
-GNU General Public License v3.0 – see [LICENSE](LICENSE).
+GNU General Public License v3.0; see [LICENSE](LICENSE).
+
+The app uses open-source libraries and fonts under their own licences, listed with their full texts in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt). That file is included in every package. Regenerate it with
+`python3 tools/third_party_notices.py` after changing dependencies; the release workflow fails if it is out of date.

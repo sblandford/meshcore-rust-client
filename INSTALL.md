@@ -1,4 +1,6 @@
-# Installing the MeshCore desktop client
+# Installing Rust Desktop Client for MeshCore
+
+_Independent open-source software, compatible with MeshCore radios. Not affiliated with or endorsed by the MeshCore project._
 
 Download the file for your system from the
 [Releases page](https://github.com/sblandford/meshcore-rust-client/releases/latest).
@@ -6,9 +8,9 @@ Replace `vX.Y.Z` below with the version you downloaded.
 
 | System | Installer | Portable (no install) |
 |---|---|---|
-| Windows 10/11, 64-bit | `meshcore-vX.Y.Z-windows-x86_64.msi` | `meshcore-vX.Y.Z-windows-x86_64.zip` |
-| macOS 11 or later, Apple Silicon or Intel | `meshcore-vX.Y.Z-macos-universal.dmg` | |
-| Linux, 64-bit | `meshcore-vX.Y.Z-linux-x86_64.flatpak` | `meshcore-vX.Y.Z-linux-x86_64.tar.gz` |
+| Windows 10/11, 64-bit | `meshcore-rust-client-vX.Y.Z-windows-x86_64.msi` | `meshcore-rust-client-vX.Y.Z-windows-x86_64.zip` |
+| macOS 11 or later, Apple Silicon or Intel | `meshcore-rust-client-vX.Y.Z-macos-universal.dmg` | |
+| Linux, 64-bit | `meshcore-rust-client-vX.Y.Z-linux-x86_64.flatpak` | `meshcore-rust-client-vX.Y.Z-linux-x86_64.tar.gz` |
 
 To check a download wasn't corrupted, compare its SHA-256 checksum with `SHA256SUMS.txt`:
 
@@ -18,6 +20,10 @@ To check a download wasn't corrupted, compare its SHA-256 checksum with `SHA256S
 | macOS | `shasum -a 256 <file>` |
 | Windows (PowerShell) | `Get-FileHash <file>` |
 
+Every package includes `LICENSE` (GNU GPL v3) and `THIRD-PARTY-NOTICES.txt`, which lists the licences of the
+open-source libraries and fonts it contains. You are responsible for using radio settings (frequency, power and
+duty cycle) that are legal where you are.
+
 The packages are not signed with a paid code-signing certificate, so Windows and macOS warn you the first time.
 The steps below explain how to get past the warnings.
 
@@ -26,20 +32,20 @@ The steps below explain how to get past the warnings.
 ## Windows
 
 ### Install
-1. Double-click `meshcore-vX.Y.Z-windows-x86_64.msi`.
+1. Double-click `meshcore-rust-client-vX.Y.Z-windows-x86_64.msi`.
 2. If **"Windows protected your PC"** (SmartScreen) appears, click **More info**, then **Run anyway**.
-3. Follow the installer: accept the licence, choose a folder (the default is `C:\Program Files\MeshCore`),
+3. Follow the installer: accept the licence, choose a folder (the default is `C:\Program Files\Rust Desktop Client for MeshCore`),
    then click **Install**. Windows asks for administrator permission.
-4. Start **MeshCore** from the Start menu.
+4. Start **Rust Desktop Client for MeshCore** from the Start menu.
 
 To upgrade, run the newer `.msi`. It replaces the old version, and your message history is kept.
 
 ### Uninstall
-Go to **Settings › Apps › Installed apps › MeshCore › Uninstall**. Message history stays in
+Go to **Settings › Apps › Installed apps › Rust Desktop Client for MeshCore › Uninstall**. Message history stays in
 `%APPDATA%\meshcore-client`. Delete that folder as well if you want to remove it.
 
 ### Portable version
-Extract the `.zip` anywhere and run `meshcore.exe`. Nothing is installed.
+Extract the `.zip` anywhere and run `meshcore-rust-client.exe`. Nothing is installed.
 
 ### Connecting
 - **USB:** Windows 10/11 include drivers for most MeshCore boards. Boards with CP210x or CH340 USB chips
@@ -52,25 +58,25 @@ Extract the `.zip` anywhere and run `meshcore.exe`. Nothing is installed.
 ## macOS
 
 ### Install
-1. Open `meshcore-vX.Y.Z-macos-universal.dmg`.
-2. Drag **MeshCore** onto the **Applications** folder in the same window, then eject the disk image.
-3. Open MeshCore from Applications or Launchpad. The first time, macOS blocks it because the app isn't
+1. Open `meshcore-rust-client-vX.Y.Z-macos-universal.dmg`.
+2. Drag **Rust Desktop Client for MeshCore** onto the **Applications** folder in the same window, then eject the disk image.
+3. Open Rust Desktop Client for MeshCore from Applications or Launchpad. The first time, macOS blocks it because the app isn't
    notarised by Apple:
    - **macOS 15 (Sequoia) or later:** click **Done**. Then open **System Settings › Privacy & Security**,
-     scroll down to the MeshCore message, click **Open Anyway** and confirm with your password.
-   - **macOS 14 or earlier:** right-click (or Control-click) MeshCore in Applications, choose **Open**,
+     scroll down to the message about the app, click **Open Anyway** and confirm with your password.
+   - **macOS 14 or earlier:** right-click (or Control-click) the app in Applications, choose **Open**,
      then click **Open**.
 
    Alternatively, run this once in Terminal:
    ```sh
-   xattr -dr com.apple.quarantine /Applications/MeshCore.app
+   xattr -dr com.apple.quarantine "/Applications/Rust Desktop Client for MeshCore.app"
    ```
-4. When asked whether MeshCore may use Bluetooth, click **Allow**.
+4. When asked whether the app may use Bluetooth, click **Allow**.
 
 To upgrade, drag the newer version into Applications and choose **Replace**.
 
 ### Uninstall
-Drag **MeshCore** from Applications to the Bin. Message history stays in
+Drag **Rust Desktop Client for MeshCore** from Applications to the Bin. Message history stays in
 `~/Library/Application Support/meshcore-client`.
 
 ### Connecting
@@ -91,10 +97,10 @@ Flatpak works on almost every distribution. If you don't have it yet, see
 ```sh
 # The app runs on the Freedesktop runtime from Flathub, which is fetched automatically:
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user meshcore-vX.Y.Z-linux-x86_64.flatpak
+flatpak install --user meshcore-rust-client-vX.Y.Z-linux-x86_64.flatpak
 ```
 
-Start **MeshCore** from your applications menu, or run:
+Start **Rust Desktop Client for MeshCore** from your applications menu, or run:
 ```sh
 flatpak run io.github.sblandford.MeshCoreClient
 ```
@@ -120,16 +126,16 @@ The app has no network access and no access to your files. Its message history i
 
 ### Portable tar.gz
 ```sh
-tar xzf meshcore-vX.Y.Z-linux-x86_64.tar.gz
-cd meshcore-vX.Y.Z-linux-x86_64
-./meshcore
+tar xzf meshcore-rust-client-vX.Y.Z-linux-x86_64.tar.gz
+cd meshcore-rust-client-vX.Y.Z-linux-x86_64
+./meshcore-rust-client
 ```
 
 Optionally, add it to your applications menu:
 ```sh
-install -Dm755 meshcore ~/.local/bin/meshcore
+install -Dm755 meshcore-rust-client ~/.local/bin/meshcore-rust-client
 install -Dm644 icons/io.github.sblandford.MeshCoreClient.png ~/.local/share/icons/hicolor/256x256/apps/io.github.sblandford.MeshCoreClient.png
-sed "s|^Exec=.*|Exec=$HOME/.local/bin/meshcore|" io.github.sblandford.MeshCoreClient.desktop > ~/.local/share/applications/io.github.sblandford.MeshCoreClient.desktop
+sed "s|^Exec=.*|Exec=$HOME/.local/bin/meshcore-rust-client|" io.github.sblandford.MeshCoreClient.desktop > ~/.local/share/applications/io.github.sblandford.MeshCoreClient.desktop
 ```
 
 The binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later). It loads X11 or Wayland and
@@ -158,7 +164,7 @@ flatpak install --user flathub org.flatpak.Builder org.freedesktop.Sdk//26.08 or
 flatpak run org.flatpak.Builder --user --install --force-clean --disable-rofiles-fuse --repo=flatpak-repo \
     build-dir packaging/linux/io.github.sblandford.MeshCoreClient.yml
 flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-    flatpak-repo meshcore.flatpak io.github.sblandford.MeshCoreClient master
+    flatpak-repo meshcore-rust-client.flatpak io.github.sblandford.MeshCoreClient master
 ```
 
 ### Windows MSI and macOS DMG

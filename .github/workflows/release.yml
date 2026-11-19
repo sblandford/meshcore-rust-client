@@ -13,6 +13,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   APP_ID: io.github.sblandford.MeshCoreClient
+  APP_NAME: Rust Desktop Client for MeshCore
+  BIN: meshcore-rust-client
 
 jobs:
   linux:
@@ -21,16 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
+      - name: Check third-party notices match Cargo.lock
+        run: python3 tools/third_party_notices.py --check
       - run: cargo test
       - run: cargo build --release
       - name: Package
         run: |
-          d=meshcore-${GITHUB_REF_NAME}-linux-x86_64
-          mkdir -p "$d/icons" && cp target/release/meshcore README.md INSTALL.md LICENSE "$d/"
+          d=$BIN-${GITHUB_REF_NAME}-linux-x86_64
+          mkdir -p "$d/icons" && cp target/release/$BIN README.md INSTALL.md LICENSE THIRD-PARTY-NOTICES.txt "$d/"
           cp packaging/linux/$APP_ID.desktop "$d/" && cp packaging/icons/meshcore-256.png "$d/icons/$APP_ID.png"
           tar czf "$d.tar.gz" "$d"
       - uses: actions/upload-artifact@v4
-        with: { name: linux, path: "meshcore-*.tar.gz" }
+        with: { name: linux, path: "meshcore-rust-client-*.tar.gz" }
 
   flatpak:
     name: Linux (Flatpak)
@@ -49,9 +53,9 @@ jobs:
       - name: Bundle
         run: |
           flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-            flatpak-repo "meshcore-${GITHUB_REF_NAME}-linux-x86_64.flatpak" $APP_ID master
+            flatpak-repo "$BIN-${GITHUB_REF_NAME}-linux-x86_64.flatpak" $APP_ID master
       - uses: actions/upload-artifact@v4
-        with: { name: flatpak, path: "meshcore-*.flatpak" }
+        with: { name: flatpak, path: "meshcore-rust-client-*.flatpak" }
 
   windows:
     name: Windows (MSI + portable zip)
@@ -64,9 +68,9 @@ jobs:
       - run: cargo build --release
       - name: Portable zip
         run: |
-          $d = "meshcore-$env:GITHUB_REF_NAME-windows-x86_64"
+          $d = "$env:BIN-$env:GITHUB_REF_NAME-windows-x86_64"
           New-Item -ItemType Directory $d | Out-Null
-          Copy-Item target/release/meshcore.exe, README.md, INSTALL.md, LICENSE $d
+          Copy-Item "target/release/$env:BIN.exe", README.md, INSTALL.md, LICENSE, THIRD-PARTY-NOTICES.txt $d
           Compress-Archive -Path $d -DestinationPath "$d.zip"
       - name: MSI installer
         run: |
@@ -78,8 +82,8 @@ jobs:
           New-Item -ItemType Directory build -Force | Out-Null
           "{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs16 $t}" | Set-Content -Encoding ascii build/license.rtf
           $out = & wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext `
-            -d Version=$ver -d Root="$PWD" -d Exe="$PWD\target\release\meshcore.exe" -d LicenseRtf="$PWD\build\license.rtf" `
-            -o "meshcore-$env:GITHUB_REF_NAME-windows-x86_64.msi" 2>&1
+            -d Version=$ver -d Root="$PWD" -d Exe="$PWD\target\release\$env:BIN.exe" -d LicenseRtf="$PWD\build\license.rtf" `
+            -o "$env:BIN-$env:GITHUB_REF_NAME-windows-x86_64.msi" 2>&1
           $code = $LASTEXITCODE
           $out | ForEach-Object { Write-Host $_ }
           # Surface WiX diagnostics as annotations (readable without downloading logs).
@@ -89,8 +93,8 @@ jobs:
         with:
           name: windows
           path: |
-            meshcore-*.msi
-            meshcore-*.zip
+            meshcore-rust-client-*.msi
+            meshcore-rust-client-*.zip
 
   macos:
     name: macOS (universal DMG)
@@ -106,18 +110,18 @@ jobs:
       - name: App bundle and DMG
         run: |
           ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          app=dmg/MeshCore.app
+          app="dmg/$APP_NAME.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          lipo -create -output "$app/Contents/MacOS/meshcore" \
-            target/aarch64-apple-darwin/release/meshcore target/x86_64-apple-darwin/release/meshcore
+          lipo -create -output "$app/Contents/MacOS/$BIN" \
+            target/aarch64-apple-darwin/release/$BIN target/x86_64-apple-darwin/release/$BIN
           sed "s/@VERSION@/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           cp packaging/icons/meshcore.icns "$app/Contents/Resources/meshcore.icns"
           codesign --force --deep --sign - "$app"
           ln -s /Applications dmg/Applications
-          cp INSTALL.md LICENSE dmg/
-          hdiutil create -volname "MeshCore $ver" -srcfolder dmg -ov -format UDZO "meshcore-${GITHUB_REF_NAME}-macos-universal.dmg"
+          cp INSTALL.md LICENSE THIRD-PARTY-NOTICES.txt dmg/
+          hdiutil create -volname "$APP_NAME $ver" -srcfolder dmg -ov -format UDZO "$BIN-${GITHUB_REF_NAME}-macos-universal.dmg"
       - uses: actions/upload-artifact@v4
-        with: { name: macos, path: "meshcore-*.dmg" }
+        with: { name: macos, path: "meshcore-rust-client-*.dmg" }
 
   release:
     needs: [linux, flatpak, windows, macos]
@@ -135,17 +139,24 @@ jobs:
         run: |
           t=${GITHUB_REF_NAME}
           cat > notes.md <<EOF
-          Native desktop client for MeshCore companion radios over USB serial or Bluetooth LE.
+          **Rust Desktop Client for MeshCore**: a native desktop app for MeshCore companion radios over USB serial
+          or Bluetooth LE.
+
+          > Independent open-source software, compatible with MeshCore radios. Not affiliated with or endorsed by
+          > the MeshCore project.
 
           ## Downloads
           | Platform | Installer | Portable |
           |---|---|---|
-          | Windows 10/11 (x86_64) | \`meshcore-$t-windows-x86_64.msi\` | \`meshcore-$t-windows-x86_64.zip\` |
-          | macOS 11+ (Apple Silicon and Intel) | \`meshcore-$t-macos-universal.dmg\` | |
-          | Linux (x86_64) | \`meshcore-$t-linux-x86_64.flatpak\` | \`meshcore-$t-linux-x86_64.tar.gz\` |
+          | Windows 10/11 (x86_64) | \`$BIN-$t-windows-x86_64.msi\` | \`$BIN-$t-windows-x86_64.zip\` |
+          | macOS 11+ (Apple Silicon and Intel) | \`$BIN-$t-macos-universal.dmg\` | |
+          | Linux (x86_64) | \`$BIN-$t-linux-x86_64.flatpak\` | \`$BIN-$t-linux-x86_64.tar.gz\` |
 
           See [INSTALL.md](https://github.com/${GITHUB_REPOSITORY}/blob/$t/INSTALL.md) for step-by-step installation
           instructions, including the first-run security prompts for these unsigned packages.
-          Verify downloads with \`SHA256SUMS.txt\`.
+          Verify downloads with \`SHA256SUMS.txt\`. Licensed under the GNU GPL v3; third-party licences are listed in
+          \`THIRD-PARTY-NOTICES.txt\`, which is included in every package.
+
+          You are responsible for using radio settings (frequency, power, duty cycle) that are legal where you are.
           EOF
-          gh release create "$t" dist/* --title "MeshCore desktop client $t" --notes-file notes.md --generate-notes
+          gh release create "$t" dist/* --title "Rust Desktop Client for MeshCore $t" --notes-file notes.md --generate-notes

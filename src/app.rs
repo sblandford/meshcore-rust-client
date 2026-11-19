@@ -41,6 +41,9 @@ pub struct Message {
     pub ack: u32,
     pub attempt: u8,
     pub deadline: Option<Instant>,
+    /// Relays heard re-transmitting this (outgoing) message: (relay hash, SNR).
+    /// An empty hash means the relay could not be identified.
+    pub repeats: Vec<(Vec<u8>, f32)>,
 }
 
 #[derive(Default)]
@@ -73,6 +76,20 @@ pub struct Remote {
     pub telemetry_at: u64,
     pub trace: Option<String>,
     pub discovery: Option<String>,
+    pub ping: Option<String>,
+    pub neighbours: Option<(u16, Vec<proto::Neighbour>, u64)>,
+    pub owner: Option<String>,
+    pub advert_path: Option<String>,
+}
+
+/// Kinds of binary request sent to repeaters.
+pub const BIN_NEIGHBOURS: u8 = 1;
+pub const BIN_OWNER: u8 = 2;
+
+struct TraceReq {
+    pk: [u8; 32],
+    ping: bool,
+    sent: Instant,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -102,6 +119,18 @@ enum Expect {
     Export(String),
     Stats(u8),
     Reload(String),
+    DeviceRefresh,
+    AutoAdd,
+    Tuning,
+    Scope,
+    CustomVars,
+    RepeatFreqs,
+    DeviceTime,
+    PrivateKey,
+    SelfTelemetry,
+    Cli,
+    AdvertPath([u8; 32]),
+    Binary([u8; 32], u8),
 }
 
 struct Cmd {
@@ -143,7 +172,24 @@ pub struct App {
     store: Option<Store>,
     next_id: u64,
     awaiting_ack: Vec<(ChatKey, u64)>,
-    traces: HashMap<u32, ([u8; 32], Vec<u8>, usize)>,
+    traces: HashMap<u32, TraceReq>,
+    binary_pending: HashMap<u32, ([u8; 32], u8)>,
+
+    // optional device settings (None = not reported by this firmware)
+    pub autoadd: Option<(u8, u8)>,
+    pub tuning: Option<(u32, u32)>,
+    pub default_scope: Option<Option<(String, [u8; 16])>>,
+    pub custom_vars: Vec<(String, String)>,
+    pub repeat_freqs: Vec<(u32, u32)>,
+    /// (radio clock, local clock) when last read.
+    pub device_clock: Option<(u32, u64)>,
+    pub self_telemetry: Vec<(String, String)>,
+    pub private_key: Option<Vec<u8>>,
+    pub cli_log: VecDeque<String>,
+    /// Nodes heard advertising that the radio did not add as contacts.
+    pub discovered: Vec<Contact>,
+    /// Set when a message arrives; the UI clears it after alerting the user.
+    pub attention: bool,
 
     // log + notices
     pub log: VecDeque<LogLine>,
@@ -199,6 +245,18 @@ impl App {
             next_id: 1,
             awaiting_ack: Vec::new(),
             traces: HashMap::new(),
+            binary_pending: HashMap::new(),
+            autoadd: None,
+            tuning: None,
+            default_scope: None,
+            custom_vars: Vec::new(),
+            repeat_freqs: Vec::new(),
+            device_clock: None,
+            self_telemetry: Vec::new(),
+            private_key: None,
+            cli_log: VecDeque::new(),
+            discovered: Vec::new(),
+            attention: false,
             log: VecDeque::new(),
             rx_log: VecDeque::new(),
             toasts: VecDeque::new(),
@@ -342,6 +400,13 @@ impl App {
             return;
         };
         if Frame::is_push(code) {
+            if let (Frame::Telemetry { prefix, data }, Some((Expect::SelfTelemetry, _))) = (&frame, &self.inflight) {
+                if self.me.as_ref().map(|m| m.pubkey.starts_with(prefix)).unwrap_or(false) {
+                    self.self_telemetry = proto::decode_lpp(data);
+                    self.inflight = None;
+                    return;
+                }
+            }
             self.on_push(frame);
             return;
         }
@@ -374,6 +439,15 @@ impl App {
                 for i in 0..d.max_channels.max(1) {
                     self.push(proto::get_channel(i), Expect::Channel(i));
                 }
+                // Optional settings; older firmware answers "unsupported", which is ignored.
+                self.push(proto::simple(proto::CMD_GET_AUTOADD_CONFIG), Expect::AutoAdd);
+                self.push(proto::simple(proto::CMD_GET_TUNING_PARAMS), Expect::Tuning);
+                self.push(proto::simple(proto::CMD_GET_DEFAULT_FLOOD_SCOPE), Expect::Scope);
+                self.push(proto::simple(proto::CMD_GET_CUSTOM_VARS), Expect::CustomVars);
+                if d.repeat.is_some() {
+                    self.push(proto::simple(proto::CMD_GET_ALLOWED_REPEAT_FREQ), Expect::RepeatFreqs);
+                }
+                self.push(proto::simple(proto::CMD_GET_DEVICE_TIME), Expect::DeviceTime);
                 // Messages are synced after channels are known so they can be attributed.
                 self.syncing = true;
                 self.push(proto::simple(proto::CMD_SYNC_NEXT_MESSAGE), Expect::Sync);
@@ -441,8 +515,42 @@ impl App {
                 self.remote(pk).busy = Some(what);
             }
             (Expect::Trace(pk), Frame::Sent { tag, .. }) => {
-                let _ = tag;
-                self.remote(pk).busy = Some("Tracing…");
+                let ping = self.traces.get(&tag).map(|t| t.ping).unwrap_or(false);
+                if let Some(t) = self.traces.get_mut(&tag) {
+                    t.sent = Instant::now(); // round-trip time is measured from here
+                }
+                self.remote(pk).busy = Some(if ping { "Pinging…" } else { "Tracing…" });
+            }
+            (Expect::DeviceRefresh, Frame::DeviceInfo(d)) => self.device = Some(d),
+            (Expect::AutoAdd, Frame::AutoAdd { config, max_hops }) => self.autoadd = Some((config, max_hops)),
+            (Expect::Tuning, Frame::Tuning { rx_delay, airtime }) => self.tuning = Some((rx_delay, airtime)),
+            (Expect::Scope, Frame::DefaultScope(sc)) => self.default_scope = Some(sc),
+            (Expect::CustomVars, Frame::CustomVars(text)) => {
+                self.custom_vars = text
+                    .split(',')
+                    .filter_map(|kv| kv.split_once(':'))
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                    .filter(|(k, _)| !k.is_empty())
+                    .collect();
+            }
+            (Expect::RepeatFreqs, Frame::RepeatFreqs(v)) => self.repeat_freqs = v,
+            (Expect::DeviceTime, Frame::CurrTime(t)) => self.device_clock = Some((t, now())),
+            (Expect::PrivateKey, Frame::PrivateKey(k)) => self.private_key = Some(k),
+            (Expect::Cli, Frame::CliReply(t)) => {
+                for line in t.lines() {
+                    self.cli_log.push_back(line.to_string());
+                }
+                while self.cli_log.len() > 500 {
+                    self.cli_log.pop_front();
+                }
+            }
+            (Expect::AdvertPath(pk), Frame::AdvertPath { ts, path, hash_size }) => {
+                let route = if path.is_empty() { "direct (no relays)".to_string() } else { self.describe_route(&path, hash_size) };
+                self.remote(pk).advert_path = Some(format!("{route}, heard {}", util::ago(ts as u64)));
+            }
+            (Expect::Binary(pk, kind), Frame::Sent { tag, .. }) => {
+                self.binary_pending.insert(tag, (pk, kind));
+                self.remote(pk).busy = Some(if kind == BIN_NEIGHBOURS { "Requesting neighbours…" } else { "Requesting owner info…" });
             }
             (Expect::Export(label), Frame::ExportContact(b)) => {
                 self.clipboard = Some(format!("meshcore://{}", hex(&b)));
@@ -467,7 +575,11 @@ impl App {
                 self.set_status(key, id, Status::Failed);
                 self.toast(format!("Send failed: {why}"));
             }
-            Expect::Login(pk) | Expect::Remote(pk, _) | Expect::Trace(pk) => {
+            // Optional settings and look-ups: older firmware simply doesn't support them.
+            Expect::AutoAdd | Expect::Tuning | Expect::Scope | Expect::CustomVars | Expect::RepeatFreqs | Expect::DeviceTime | Expect::OneContact | Expect::DeviceRefresh => {}
+            Expect::AdvertPath(pk) => self.remote(pk).advert_path = None,
+            Expect::Cli => self.toast(format!("Command failed: {why} (the local console needs firmware v1.18 or later)")),
+            Expect::Login(pk) | Expect::Remote(pk, _) | Expect::Trace(pk) | Expect::Binary(pk, _) => {
                 self.remote(pk).busy = None;
                 self.toast(format!("Request failed: {why}"));
             }
@@ -495,13 +607,32 @@ impl App {
                     self.set_status(k, id, Status::Delivered(rtt_ms));
                 }
             }
+            // Heard an advert from a node the radio did NOT add (manual mode, hop limit or full list).
             Frame::NewAdvert(c) => {
-                self.note(format!("New contact heard: {} ({})", c.name, proto::type_name(c.kind)));
-                self.upsert_contact(c);
+                if self.contact(&c.pubkey).is_none() {
+                    self.note(format!("Discovered {} ({}), not added", c.name, proto::type_name(c.kind)));
+                    self.discovered.retain(|d| d.pubkey != c.pubkey);
+                    self.discovered.insert(0, c);
+                    self.discovered.truncate(100);
+                }
             }
+            // A contact was added or updated on the radio: fetch its current details.
             Frame::Advert(pk) | Frame::PathUpdated(pk) => {
-                if self.contact(&pk).is_some() {
-                    self.push(proto::with_key(30, &pk), Expect::OneContact);
+                self.discovered.retain(|d| d.pubkey != pk);
+                self.push(proto::with_key(proto::CMD_GET_CONTACT_BY_KEY, &pk), Expect::OneContact);
+            }
+            Frame::BinaryResponse { tag, data } => {
+                if let Some((pk, kind)) = self.binary_pending.remove(&tag) {
+                    let r = self.remote(pk);
+                    r.busy = None;
+                    if kind == BIN_NEIGHBOURS {
+                        match proto::decode_neighbours(&data, 4) {
+                            Some((total, list)) => r.neighbours = Some((total, list, now())),
+                            None => self.toast("Could not decode the neighbour list".into()),
+                        }
+                    } else {
+                        r.owner = Some(String::from_utf8_lossy(&data).trim_end_matches('\0').to_string());
+                    }
                 }
             }
             Frame::ContactDeleted(pk) => self.contacts.retain(|c| c.pubkey != pk),
@@ -549,7 +680,21 @@ impl App {
                 }
             }
             Frame::Trace { tag, flags, hashes, snrs, final_snr } => {
-                if let Some((pk, _path, _sz)) = self.traces.remove(&tag) {
+                if let Some(t) = self.traces.remove(&tag) {
+                    let pk = t.pk;
+                    if t.ping {
+                        let rtt = t.sent.elapsed().as_millis();
+                        let sz = 1usize << (flags & 3);
+                        // The repeater's own hop: first occurrence of its hash in the trace path.
+                        let idx = hashes.chunks(sz).position(|h| pk.starts_with(h)).unwrap_or(0);
+                        let there = snrs.get(idx).map(|v| format!("{:+.1} dB", *v as f32 / 4.0)).unwrap_or_else(|| "?".into());
+                        let s = format!("{rtt} ms round trip · heard there at {there} · reply heard here at {final_snr:+.1} dB");
+                        self.note(format!("Ping {}: {s}", self.name_of(&pk)));
+                        let r = self.remote(pk);
+                        r.ping = Some(format!("{s} ({})", util::fmt_clock(now())));
+                        r.busy = None;
+                        return;
+                    }
                     let sz = 1usize << (flags & 3);
                     let mut s = String::from("me");
                     for (i, h) in hashes.chunks(sz).enumerate() {
@@ -564,6 +709,7 @@ impl App {
                 }
             }
             Frame::LogRx { snr, rssi, raw } => {
+                self.match_repeat(&raw, snr);
                 let text = format!("SNR {snr:+.1} dB  RSSI {rssi} dBm  {}  {}", describe_packet(&raw), hex(&raw));
                 if self.rx_log.len() >= 500 {
                     self.rx_log.pop_front();
@@ -636,6 +782,7 @@ impl App {
             ack: 0,
             attempt: 0,
             deadline: None,
+            repeats: Vec::new(),
         };
         self.next_id += 1;
         if let Some(s) = &mut self.store {
@@ -646,6 +793,7 @@ impl App {
         if self.selected != Some(key) {
             chat.unread += 1;
         }
+        self.attention = true;
     }
 
     // ------------------------------------------------------------ delivery tracking
@@ -720,6 +868,7 @@ impl App {
             ack: 0,
             attempt: 0,
             deadline: None,
+            repeats: Vec::new(),
         };
         let id = msg.id;
         self.next_id += 1;
@@ -824,12 +973,26 @@ impl App {
 
     /// Trace the known route to a repeater and back again.
     pub fn trace(&mut self, pk: [u8; 32]) -> Result<(), String> {
+        self.send_trace(pk, false)
+    }
+
+    /// Ping a repeater: a trace out and back, timed. Uses the known route, or assumes the
+    /// repeater is a direct neighbour if no route is known.
+    pub fn ping(&mut self, pk: [u8; 32]) -> Result<(), String> {
+        self.send_trace(pk, true)
+    }
+
+    fn send_trace(&mut self, pk: [u8; 32], ping: bool) -> Result<(), String> {
         let c = self.contact(&pk).ok_or("unknown contact")?;
-        if c.out_path_len == proto::OUT_PATH_UNKNOWN {
-            return Err("no known route – run path discovery or wait for an advert first".into());
-        }
-        let (_, mut sz) = proto::path_dims(c.out_path_len);
-        let hops: Vec<&[u8]> = c.path_bytes().chunks(sz).collect();
+        let (hops, mut sz): (Vec<Vec<u8>>, usize) = if c.out_path_len == proto::OUT_PATH_UNKNOWN {
+            if !ping {
+                return Err("no known route – run path discovery, or use Ping if the repeater is in direct range".into());
+            }
+            (Vec::new(), 1)
+        } else {
+            let (_, sz) = proto::path_dims(c.out_path_len);
+            (c.path_bytes().chunks(sz).map(|h| h.to_vec()).collect(), sz)
+        };
         if sz == 3 {
             sz = 1; // not representable in trace flags; fall back to 1-byte hashes
         }
@@ -847,10 +1010,190 @@ impl App {
             _ => 0,
         };
         let tag = util::rand_u32();
-        self.traces.insert(tag, (pk, path.clone(), sz));
-        self.remote(pk).trace = None;
+        self.traces.insert(tag, TraceReq { pk, ping, sent: Instant::now() });
+        let r = self.remote(pk);
+        if ping {
+            r.ping = None;
+        } else {
+            r.trace = None;
+        }
         self.push(proto::trace(tag, flags, &path), Expect::Trace(pk));
         Ok(())
+    }
+
+    pub fn request_neighbours(&mut self, pk: [u8; 32]) {
+        self.push(proto::neighbours_req(&pk, 20), Expect::Binary(pk, BIN_NEIGHBOURS));
+    }
+
+    pub fn request_owner(&mut self, pk: [u8; 32]) {
+        self.push(proto::owner_req(&pk), Expect::Binary(pk, BIN_OWNER));
+    }
+
+    pub fn request_advert_path(&mut self, pk: [u8; 32]) {
+        self.push(proto::get_advert_path(&pk), Expect::AdvertPath(pk));
+    }
+
+    /// Set a contact's route manually (hash bytes, `sz` bytes per hop), or `None` for flood.
+    pub fn set_contact_path(&mut self, pk: [u8; 32], path: Option<(Vec<u8>, usize)>) {
+        let Some(c) = self.contact(&pk).cloned() else { return };
+        let f = proto::set_contact_path(&c, path.as_ref().map(|(p, sz)| (p.as_slice(), *sz)));
+        self.push(f, Expect::Label("Route updated".into()));
+        self.push(proto::with_key(proto::CMD_GET_CONTACT_BY_KEY, &pk), Expect::OneContact);
+    }
+
+    /// Add a node from the "discovered" list to the radio's contacts.
+    pub fn add_discovered(&mut self, pk: [u8; 32]) {
+        if let Some(pos) = self.discovered.iter().position(|d| d.pubkey == pk) {
+            let c = self.discovered.remove(pos);
+            self.push(proto::update_contact(&c), Expect::Label(format!("{} added to contacts", c.name)));
+            self.push(proto::with_key(proto::CMD_GET_CONTACT_BY_KEY, &pk), Expect::OneContact);
+        }
+    }
+
+    pub fn dismiss_discovered(&mut self, pk: [u8; 32]) {
+        self.discovered.retain(|d| d.pubkey != pk);
+    }
+
+    /// Names (or hex) for a list of relay hashes.
+    pub fn describe_route(&self, path: &[u8], sz: usize) -> String {
+        path.chunks(sz.max(1)).map(|h| self.relay_name(h)).collect::<Vec<_>>().join(" → ")
+    }
+
+    /// Best guess at which node a path hash refers to (repeaters preferred).
+    pub fn relay_name(&self, hash: &[u8]) -> String {
+        if hash.is_empty() {
+            return "unknown relay".into();
+        }
+        let mut m: Vec<&Contact> = self.contacts.iter().filter(|c| c.pubkey.starts_with(hash)).collect();
+        m.sort_by_key(|c| (c.kind != proto::ADV_REPEATER, std::cmp::Reverse(c.last_advert)));
+        match m.first() {
+            Some(c) if m.len() == 1 => format!("{} ({})", c.name, hex(hash)),
+            Some(c) => format!("{}? ({})", c.name, hex(hash)),
+            None => hex(hash),
+        }
+    }
+
+    /// Recognise our own outgoing messages being re-transmitted by relays.
+    fn match_repeat(&mut self, raw: &[u8], snr: f32) {
+        let Some(p) = proto::parse_raw(raw) else { return };
+        let flood = matches!(raw[0] & 3, 0 | 1);
+        let Some(me) = self.me.as_ref() else { return };
+        let my_name = format!("{}: ", me.name);
+        let my_hash = me.pubkey[0];
+        match p.payload_type {
+            proto::PAYLOAD_GRP_TXT if flood && !p.path.is_empty() => {
+                let relay = p.path[p.path.len() - p.hash_size..].to_vec();
+                let found = self.channels.iter().find_map(|ch| proto::decrypt_group_text(p.payload, &ch.secret).map(|r| (ch.secret, r)));
+                if let Some((secret, (ts, text))) = found {
+                    let Some(body) = text.strip_prefix(&my_name) else { return };
+                    let key = ChatKey::Channel(secret);
+                    let id = self.chats.get(&key).and_then(|c| c.msgs.iter().rev().find(|m| m.out && m.ts == ts && m.text == body).map(|m| m.id));
+                    if let Some(id) = id {
+                        self.add_repeat(key, id, relay, snr);
+                    }
+                }
+            }
+            proto::PAYLOAD_TXT_MSG if p.payload.len() >= 2 && p.payload[1] == my_hash => {
+                // Direct message from us (src hash) to a contact (dest hash): attribute it to our latest
+                // outgoing message to that contact sent within the last minute.
+                let dest = p.payload[0];
+                let t = now();
+                let target = self
+                    .chats
+                    .iter()
+                    .filter(|(k, _)| matches!(k, ChatKey::Contact(pk) if pk[0] == dest))
+                    .filter_map(|(k, c)| c.msgs.iter().rev().find(|m| m.out && m.txt_type == proto::TXT_PLAIN && t.saturating_sub(m.recv) < 60).map(|m| (*k, m.id, m.recv)))
+                    .max_by_key(|x| x.2);
+                let Some((key, id, _)) = target else { return };
+                let relay = if flood {
+                    if p.path.is_empty() {
+                        return;
+                    }
+                    p.path[p.path.len() - p.hash_size..].to_vec()
+                } else {
+                    // Direct routing: each relay removes itself, so the relay we heard is the hop
+                    // just before the remaining path in the contact's route.
+                    let ChatKey::Contact(pk) = key else { return };
+                    match self.contact(&pk) {
+                        Some(c) if c.out_path_len != proto::OUT_PATH_UNKNOWN => {
+                            let (n, sz) = proto::path_dims(c.out_path_len);
+                            let remaining = p.path.len() / p.hash_size.max(1);
+                            match n.checked_sub(remaining + 1) {
+                                Some(i) => c.path_bytes()[i * sz..(i + 1) * sz].to_vec(),
+                                None => return,
+                            }
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+                self.add_repeat(key, id, relay, snr);
+            }
+            _ => {}
+        }
+    }
+
+    fn add_repeat(&mut self, key: ChatKey, id: u64, relay: Vec<u8>, snr: f32) {
+        let Some(m) = self.msg_mut(key, id) else { return };
+        if !relay.is_empty() && m.repeats.iter().any(|(h, _)| *h == relay) {
+            return;
+        }
+        m.repeats.push((relay.clone(), snr));
+        if let Some(st) = &mut self.store {
+            st.add_repeat(id, &relay, snr);
+        }
+    }
+
+    // ------------------------------------------------------------ device settings
+
+    pub fn save_autoadd(&mut self, config: u8, max_hops: u8) {
+        self.push(proto::set_autoadd(config, max_hops), Expect::Label("Contact auto-add settings saved".into()));
+        self.push(proto::simple(proto::CMD_GET_AUTOADD_CONFIG), Expect::AutoAdd);
+    }
+    pub fn save_tuning(&mut self, rx_delay_x1000: u32, airtime_x1000: u32) {
+        self.push(proto::set_tuning(rx_delay_x1000, airtime_x1000), Expect::Label("Tuning saved".into()));
+        self.push(proto::simple(proto::CMD_GET_TUNING_PARAMS), Expect::Tuning);
+    }
+    pub fn save_scope(&mut self, name: Option<&str>) {
+        let f = match name {
+            Some(n) => {
+                let n = n.trim().trim_start_matches('#');
+                proto::set_default_scope(Some((n, &util::hashtag_secret(&format!("#{n}")))))
+            }
+            None => proto::set_default_scope(None),
+        };
+        self.push(f, Expect::Label("Region saved".into()));
+        self.push(proto::simple(proto::CMD_GET_DEFAULT_FLOOD_SCOPE), Expect::Scope);
+    }
+    pub fn save_custom_var(&mut self, name: &str, value: &str) {
+        self.push(proto::set_custom_var(name, value), Expect::Label(format!("{name} saved")));
+        self.push(proto::simple(proto::CMD_GET_CUSTOM_VARS), Expect::CustomVars);
+    }
+    pub fn save_path_hash_mode(&mut self, mode: u8) {
+        self.push(proto::set_path_hash_mode(mode), Expect::Label("Path hash size saved".into()));
+        self.push(proto::device_query(), Expect::DeviceRefresh);
+    }
+    pub fn read_device_clock(&mut self) {
+        self.push(proto::simple(proto::CMD_GET_DEVICE_TIME), Expect::DeviceTime);
+    }
+    pub fn request_self_telemetry(&mut self) {
+        self.push(proto::self_telemetry_req(), Expect::SelfTelemetry);
+    }
+    pub fn export_private_key(&mut self) {
+        self.push(proto::simple(proto::CMD_EXPORT_PRIVATE_KEY), Expect::PrivateKey);
+    }
+    pub fn import_private_key(&mut self, key: [u8; 64]) {
+        self.push(proto::import_private_key(&key), Expect::Reload("Private key".into()));
+        self.push(proto::get_contacts(0), Expect::Contacts);
+    }
+    pub fn factory_reset(&mut self) {
+        if let Some(l) = &self.link {
+            l.send(proto::factory_reset());
+        }
+        self.toast("Factory reset requested – the radio will erase its settings and restart".into());
+    }
+    pub fn run_cli(&mut self, cmd: &str) {
+        self.cli_log.push_back(format!("> {cmd}"));
+        self.push(proto::run_cli(cmd), Expect::Cli);
     }
 
     pub fn set_channel(&mut self, idx: u8, name: &str, secret: [u8; 16]) {
@@ -869,8 +1212,15 @@ impl App {
     pub fn save_location(&mut self, lat: f64, lon: f64) {
         self.push(proto::set_latlon(lat, lon), Expect::Reload("Location".into()));
     }
-    pub fn save_radio(&mut self, freq_khz: u32, bw_hz: u32, sf: u8, cr: u8) {
-        self.push(proto::set_radio(freq_khz, bw_hz, sf, cr), Expect::Reload("Radio parameters".into()));
+    pub fn save_radio(&mut self, freq_khz: u32, bw_hz: u32, sf: u8, cr: u8, repeat: Option<bool>) {
+        let f = match repeat {
+            Some(rep) => proto::set_radio_repeat(freq_khz, bw_hz, sf, cr, rep),
+            None => proto::set_radio(freq_khz, bw_hz, sf, cr),
+        };
+        self.push(f, Expect::Reload("Radio parameters".into()));
+        if repeat.is_some() {
+            self.push(proto::device_query(), Expect::DeviceRefresh);
+        }
     }
     pub fn save_tx_power(&mut self, dbm: i8) {
         self.push(proto::set_tx_power(dbm), Expect::Reload("Transmit power".into()));
@@ -1105,6 +1455,85 @@ pub fn describe_packet(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app() -> App {
+        unsafe { std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join("mc-app-test")) };
+        let mut app = App::new(Arc::new(|| {}));
+        app.me = Some(SelfInfo { name: "Desk Node".into(), pubkey: [0xD1; 32], ..Default::default() });
+        app
+    }
+
+    fn outgoing(app: &mut App, key: ChatKey, ts: u32, text: &str) -> u64 {
+        let id = app.next_id;
+        app.next_id += 1;
+        let m = Message {
+            id,
+            out: true,
+            ts,
+            recv: now(),
+            author: "Desk Node".into(),
+            text: text.into(),
+            status: Status::Sent,
+            txt_type: proto::TXT_PLAIN,
+            snr: None,
+            path_len: 0xFF,
+            ack: 0,
+            attempt: 0,
+            deadline: None,
+            repeats: Vec::new(),
+        };
+        app.chats.entry(key).or_default().msgs.push(m);
+        id
+    }
+
+    fn log_rx(app: &mut App, raw: Vec<u8>) {
+        let mut f = vec![proto::PUSH_LOG_RX_DATA, 24, (-80i8) as u8];
+        f.extend(raw);
+        app.on_frame(&f);
+    }
+
+    #[test]
+    fn channel_post_repeats_are_matched() {
+        let mut app = test_app();
+        let secret = util::hashtag_secret("#test");
+        app.channels.push(Channel { idx: 1, name: "#test".into(), secret });
+        let key = ChatKey::Channel(secret);
+        let id = outgoing(&mut app, key, 5000, "hello mesh");
+        let other = outgoing(&mut app, key, 5001, "another");
+        let payload = proto::tests::make_group_payload(&secret, 5000, "Desk Node: hello mesh");
+        // flood GRP_TXT relayed by 5a then 7c (we hear 7c's retransmission)
+        let mut raw = vec![(proto::PAYLOAD_GRP_TXT << 2) | 1, 2, 0x5a, 0x7c];
+        raw.extend(&payload);
+        log_rx(&mut app, raw.clone());
+        log_rx(&mut app, raw); // the same relay again is not double-counted
+        let mut raw2 = vec![(proto::PAYLOAD_GRP_TXT << 2) | 1, 1, 0x5a];
+        raw2.extend(&payload);
+        log_rx(&mut app, raw2);
+        // someone else's post on the same channel must not count
+        let mut raw3 = vec![(proto::PAYLOAD_GRP_TXT << 2) | 1, 1, 0x33];
+        raw3.extend(proto::tests::make_group_payload(&secret, 5000, "Bob: hello mesh"));
+        log_rx(&mut app, raw3);
+        let m = app.find_message(key, id).unwrap();
+        assert_eq!(m.repeats.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), vec![vec![0x7c], vec![0x5a]]);
+        assert_eq!(m.repeats[0].1, 6.0);
+        assert!(app.find_message(key, other).unwrap().repeats.is_empty());
+    }
+
+    #[test]
+    fn direct_message_repeats_are_matched() {
+        let mut app = test_app();
+        let pk = [0x42; 32];
+        let key = ChatKey::Contact(pk);
+        let id = outgoing(&mut app, key, 7000, "hi");
+        // flood TXT_MSG: payload starts dest hash, src hash
+        let raw = vec![(proto::PAYLOAD_TXT_MSG << 2) | 1, 1, 0x5a, 0x42, 0xD1, 0, 0, 1, 2, 3];
+        log_rx(&mut app, raw);
+        // a message from someone else to the same contact is ignored
+        log_rx(&mut app, vec![(proto::PAYLOAD_TXT_MSG << 2) | 1, 1, 0x5a, 0x42, 0x99, 0, 0]);
+        let m = app.find_message(key, id).unwrap();
+        assert_eq!(m.repeats.len(), 1);
+        assert_eq!(m.repeats[0].0, vec![0x5a]);
+    }
     #[test]
     fn urls() {
         assert_eq!(url_decode("a%20b+c%2Fd"), "a b c/d");

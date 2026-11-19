@@ -7,7 +7,7 @@ runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: meshcore
+command: meshcore-rust-client
 finish-args:
   # GUI (Wayland first, X11 fallback) with OpenGL
   - --socket=wayland
@@ -31,7 +31,8 @@ modules:
         CARGO_HOME: /run/build/meshcore/cargo-home
     build-commands:
       - cargo build --release --locked
-      - install -Dm755 target/release/meshcore /app/bin/meshcore
+      - install -Dm755 target/release/meshcore-rust-client /app/bin/meshcore-rust-client
+      - install -Dm644 THIRD-PARTY-NOTICES.txt LICENSE -t /app/share/doc/meshcore-rust-client
       - install -Dm644 packaging/linux/io.github.sblandford.MeshCoreClient.desktop -t /app/share/applications
       - install -Dm644 packaging/linux/io.github.sblandford.MeshCoreClient.metainfo.xml -t /app/share/metainfo
       - |

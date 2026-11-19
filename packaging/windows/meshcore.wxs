@@ -2,29 +2,30 @@
 <!--
   Windows installer (WiX Toolset v5). Built by the release workflow:
     wix build packaging/windows/meshcore.wxs -arch x64 -ext WixToolset.UI.wixext
-      -d Version=1.2.3 -d Root=<repo dir> -d Exe=<path to meshcore.exe> -d LicenseRtf=<path> -o MeshCore.msi
+      -d Version=1.2.3 -d Root=<repo dir> -d Exe=<path to meshcore-rust-client.exe> -d LicenseRtf=<path> -o installer.msi
   The UpgradeCode must never change: it lets newer MSIs replace older installs.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="MeshCore"
-           Manufacturer="MeshCore desktop client"
+  <Package Name="Rust Desktop Client for MeshCore"
+           Manufacturer="Simon Blandford"
            Version="$(var.Version)"
            UpgradeCode="4217BDE5-A964-4621-B307-FBC411142A02"
            Scope="perMachine"
            Compressed="yes">
-    <SummaryInformation Description="MeshCore desktop client installer" />
+    <SummaryInformation Description="Rust Desktop Client for MeshCore installer" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of MeshCore is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="AppIcon" SourceFile="$(var.Root)\packaging\icons\meshcore.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/sblandford/meshcore-rust-client" />
+    <Property Id="ARPCOMMENTS" Value="Independent client for MeshCore radios. Not affiliated with or endorsed by the MeshCore project." />
     <Property Id="ARPHELPLINK" Value="https://github.com/sblandford/meshcore-rust-client/issues" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="MeshCore">
+      <Directory Id="INSTALLFOLDER" Name="Rust Desktop Client for MeshCore">
         <Component Id="MainExecutable">
-          <File Id="MeshCoreExe" Source="$(var.Exe)" Name="meshcore.exe" KeyPath="yes" />
+          <File Id="MainExe" Source="$(var.Exe)" Name="meshcore-rust-client.exe" KeyPath="yes" />
         </Component>
         <!-- One component per unversioned file, so WiX can generate stable component IDs. -->
         <Component Id="LicenseDoc">
@@ -32,6 +33,9 @@
         </Component>
         <Component Id="ReadmeDoc">
           <File Id="ReadmeFile" Source="$(var.Root)\README.md" Name="README.md" KeyPath="yes" />
+        </Component>
+        <Component Id="NoticesDoc">
+          <File Id="NoticesFile" Source="$(var.Root)\THIRD-PARTY-NOTICES.txt" Name="THIRD-PARTY-NOTICES.txt" KeyPath="yes" />
         </Component>
         <Component Id="InstallDoc">
           <File Id="InstallFile" Source="$(var.Root)\INSTALL.md" Name="INSTALL.md" KeyPath="yes" />
@@ -42,20 +46,21 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut">
         <Shortcut Id="StartMenuEntry"
-                  Name="MeshCore"
-                  Description="Chat over MeshCore LoRa companion radios"
-                  Target="[INSTALLFOLDER]meshcore.exe"
+                  Name="Rust Desktop Client for MeshCore"
+                  Description="Independent client for MeshCore LoRa companion radios"
+                  Target="[INSTALLFOLDER]meshcore-rust-client.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon" />
-        <RegistryValue Root="HKCU" Key="Software\MeshCoreClient" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\MeshCoreRustClient" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </StandardDirectory>
 
-    <Feature Id="Main" Title="MeshCore" Level="1">
+    <Feature Id="Main" Title="Rust Desktop Client for MeshCore" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="LicenseDoc" />
       <ComponentRef Id="ReadmeDoc" />
       <ComponentRef Id="InstallDoc" />
+      <ComponentRef Id="NoticesDoc" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
@@ -63,9 +68,9 @@
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
 
     <!-- Offer to start the app when the installer finishes. -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch MeshCore" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Rust Desktop Client for MeshCore" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <CustomAction Id="LaunchApplication" Directory="INSTALLFOLDER" ExeCommand="[INSTALLFOLDER]meshcore.exe" Return="asyncNoWait" />
+    <CustomAction Id="LaunchApplication" Directory="INSTALLFOLDER" ExeCommand="[INSTALLFOLDER]meshcore-rust-client.exe" Return="asyncNoWait" />
     <UI>
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
     </UI>

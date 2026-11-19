@@ -85,6 +85,33 @@ def handle(f):
         later(1.2, bytes([0x89, 0, len(path), f[9]]) + tag + bytes(4) + path + snrs + bytes([40]))
     elif c == 7:
         send(bytes([0]))
+    elif c == 59:  # auto-add config: overwrite oldest + companions, max 3 hops
+        send(bytes([25, 0x03, 3]))
+    elif c == 58:
+        send(bytes([0]))
+    elif c == 43:
+        send(bytes([23]) + struct.pack('<II', 0, 1000))
+    elif c == 64:
+        send(bytes([28]))
+    elif c == 40:
+        send(bytes([21]) + b'gps:0,gps_interval:900')
+    elif c == 60:
+        send(bytes([26]) + struct.pack('<IIIIII', 433000, 433000, 869495, 869495, 918000, 918000))
+    elif c == 5:
+        send(bytes([9]) + struct.pack('<I', int(time.time()) - 42))
+    elif c == 42:  # advert path for any contact: via 5a
+        send(bytes([22]) + struct.pack('<I', now - 900) + bytes([1, 0x5A]))
+    elif c == 39 and len(f) == 4:  # own telemetry
+        send(bytes([0x8B, 0]) + ME[:6] + bytes([1, 116, 0x01, 0xA0, 1, 103, 0x00, 0xE6]))
+    elif c == 50:  # binary request: neighbours (6) or owner info (7)
+        tag = bytes([9, 8, 7, 6])
+        send(bytes([6, 0]) + tag + struct.pack('<I', 3000))
+        if f[33] == 6:
+            body = struct.pack('<HH', 3, 2) + key(0x22)[:4] + struct.pack('<I', 120) + bytes([28]) + \
+                key(0x55)[:4] + struct.pack('<I', 3600) + bytes([(-14) & 0xFF])
+        else:
+            body = b'v1.18.0\nHilltop Repeater\nG7XYZ, hilltop mast'
+        later(1.0, bytes([0x8C, 0]) + tag + body)
     else:
         send(bytes([0]))
 

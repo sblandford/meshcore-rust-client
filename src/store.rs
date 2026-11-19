@@ -100,6 +100,7 @@ impl Store {
                             ack: 0,
                             attempt: 0,
                             deadline: None,
+                            repeats: Vec::new(),
                         };
                         max_id = max_id.max(id);
                         index.insert(id, key);
@@ -109,6 +110,12 @@ impl Store {
                         let Ok(id) = p[1].parse::<u64>() else { continue };
                         if let Some(m) = index.get(&id).and_then(|k| hist.get_mut(k)).and_then(|v| v.iter_mut().rev().find(|m| m.id == id)) {
                             m.status = parse_status(p[2]);
+                        }
+                    }
+                    Some("R") if p.len() >= 4 => {
+                        let Ok(id) = p[1].parse::<u64>() else { continue };
+                        if let Some(m) = index.get(&id).and_then(|k| hist.get_mut(k)).and_then(|v| v.iter_mut().rev().find(|m| m.id == id)) {
+                            m.repeats.push((unhex(p[2]).unwrap_or_default(), p[3].parse().unwrap_or(0.0)));
                         }
                     }
                     Some("D") if p.len() >= 2 => {
@@ -160,6 +167,11 @@ impl Store {
             snr,
             m.path_len
         ));
+    }
+
+    /// Record that a relay was heard re-transmitting an outgoing message.
+    pub fn add_repeat(&mut self, id: u64, relay: &[u8], snr: f32) {
+        self.write(format!("R\t{id}\t{}\t{snr}\n", hex(relay)));
     }
 
     /// Record that one message was deleted.
@@ -229,6 +241,7 @@ mod tests {
             ack: 0,
             attempt: 0,
             deadline: None,
+            repeats: Vec::new(),
         };
         let (a, b) = (ChatKey::Contact([1; 32]), ChatKey::Channel([2; 16]));
         {

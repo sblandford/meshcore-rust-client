@@ -53,6 +53,27 @@ struct Form {
     share_loc: bool,
     multi_acks: bool,
     pin: String,
+    // contact auto-add (bits as in proto::AUTOADD_*)
+    autoadd_types: [bool; 4],
+    overwrite_oldest: bool,
+    max_hops: u8,
+    // radio extras
+    repeat: bool,
+    path_hash: u8,
+    region: String,
+    rx_delay: String,
+    airtime: String,
+    // device
+    vars: Vec<(String, String)>,
+    key_import: String,
+    cli: String,
+}
+
+/// Manual route editor state.
+struct RouteForm {
+    pk: [u8; 32],
+    text: String,
+    hash_size: usize,
 }
 
 #[derive(Default)]
@@ -73,6 +94,7 @@ pub struct Gui {
     tab: SettingsTab,
     form: Form,
     show_log: bool,
+    show_about: bool,
     show_rx: bool,
     chan: Option<ChanForm>,
     import: Option<String>,
@@ -83,6 +105,7 @@ pub struct Gui {
     confirm: Option<(String, Box<dyn Fn(&mut App)>)>,
     title: String,
     info: Option<(ChatKey, u64)>,
+    route: Option<RouteForm>,
     block_name: String,
 }
 
@@ -104,6 +127,7 @@ impl Gui {
             tab: SettingsTab::Node,
             form: Form::default(),
             show_log: false,
+            show_about: false,
             show_rx: false,
             chan: None,
             import: None,
@@ -114,6 +138,7 @@ impl Gui {
             confirm: None,
             title: String::new(),
             info: None,
+            route: None,
             block_name: String::new(),
         }
     }
@@ -134,6 +159,20 @@ impl Gui {
             share_loc: me.advert_loc_policy != 0,
             multi_acks: me.multi_acks != 0,
             pin: self.app.device.as_ref().map(|d| if d.ble_pin == 0 { String::new() } else { d.ble_pin.to_string() }).unwrap_or_default(),
+            autoadd_types: {
+                let c = self.app.autoadd.map(|a| a.0).unwrap_or(0);
+                [proto::AUTOADD_CHAT, proto::AUTOADD_REPEATER, proto::AUTOADD_ROOM, proto::AUTOADD_SENSOR].map(|b| c & b != 0)
+            },
+            overwrite_oldest: self.app.autoadd.map(|a| a.0 & proto::AUTOADD_OVERWRITE_OLDEST != 0).unwrap_or(false),
+            max_hops: self.app.autoadd.map(|a| a.1).unwrap_or(0),
+            repeat: self.app.device.as_ref().and_then(|d| d.repeat).unwrap_or(false),
+            path_hash: self.app.device.as_ref().and_then(|d| d.path_hash_mode).unwrap_or(0),
+            region: self.app.default_scope.clone().flatten().map(|s| s.0).unwrap_or_default(),
+            rx_delay: self.app.tuning.map(|t| format!("{:.3}", t.0 as f32 / 1000.0)).unwrap_or_default(),
+            airtime: self.app.tuning.map(|t| format!("{:.3}", t.1 as f32 / 1000.0)).unwrap_or_default(),
+            vars: self.app.custom_vars.clone(),
+            key_import: String::new(),
+            cli: String::new(),
         };
     }
 
@@ -178,6 +217,9 @@ impl Gui {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("About").clicked() {
+                    self.show_about = !self.show_about;
+                }
                 if ui.button("📜 Log").clicked() {
                     self.show_log = !self.show_log;
                 }
@@ -314,6 +356,40 @@ impl Gui {
                     self.list_row(ui, key, "?", &title, String::new(), unread);
                 }
             }
+            if !self.app.discovered.is_empty() && q.is_empty() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.strong(format!("Discovered ({})", self.app.discovered.len()));
+                    ui.label(RichText::new("heard, not added").small().color(Color32::GRAY));
+                });
+                for d in self.app.discovered.clone() {
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::Button::new(format!("{}  {}", icon(d.kind), d.name)).frame(false).truncate()).on_hover_text(format!("{} · {}", proto::type_name(d.kind), hex(&d.pubkey[..6])));
+                        r.context_menu(|ui| {
+                            if ui.add_enabled(self.app.connected(), egui::Button::new("Add to contacts")).clicked() {
+                                self.app.add_discovered(d.pubkey);
+                                ui.close();
+                            }
+                            if ui.button("Copy public key").clicked() {
+                                ui.ctx().copy_text(hex(&d.pubkey));
+                                ui.close();
+                            }
+                            if ui.button("Dismiss").clicked() {
+                                self.app.dismiss_discovered(d.pubkey);
+                                ui.close();
+                            }
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                                self.app.dismiss_discovered(d.pubkey);
+                            }
+                            if ui.add_enabled(self.app.connected(), egui::Button::new("Add").small()).clicked() {
+                                self.app.add_discovered(d.pubkey);
+                            }
+                        });
+                    });
+                }
+            }
             if self.app.contacts.is_empty() && self.app.connected() {
                 ui.label(RichText::new("No contacts yet. Send an advert so others can find you.").small().color(Color32::GRAY));
             }
@@ -369,6 +445,11 @@ impl Gui {
     }
 
     fn select(&mut self, key: ChatKey) {
+        if let ChatKey::Contact(pk) = key {
+            if self.app.connected() && self.app.selected != Some(key) && self.app.contact(&pk).is_some() {
+                self.app.request_advert_path(pk);
+            }
+        }
         self.app.selected = Some(key);
         if let Some(c) = self.app.chats.get_mut(&key) {
             c.unread = 0;
@@ -415,6 +496,9 @@ impl Gui {
                         .small()
                         .color(Color32::GRAY),
                     );
+                    if let Some(p) = self.app.remotes.get(pk).and_then(|r| r.advert_path.clone()) {
+                        ui.label(RichText::new(format!("Last advert arrived via {p}")).small().color(Color32::GRAY));
+                    }
                     if c.kind != proto::ADV_CHAT {
                         self.remote_panel(ui, c);
                     }
@@ -528,6 +612,16 @@ impl Gui {
                 self.app.path_discovery(pk);
                 ui.close();
             }
+            if ui.add_enabled(on, egui::Button::new("Set route manually…")).clicked() {
+                let (text, sz) = if c.out_path_len == proto::OUT_PATH_UNKNOWN {
+                    (String::new(), self.app.device.as_ref().and_then(|d| d.path_hash_mode).unwrap_or(0) as usize + 1)
+                } else {
+                    let (_, sz) = proto::path_dims(c.out_path_len);
+                    (c.path_bytes().chunks(sz).map(hex).collect::<Vec<_>>().join(","), sz)
+                };
+                self.route = Some(RouteForm { pk, text, hash_size: sz });
+                ui.close();
+            }
             if ui.add_enabled(on, egui::Button::new("Request telemetry")).clicked() {
                 self.app.request_telemetry(pk);
                 ui.close();
@@ -636,10 +730,23 @@ impl Gui {
             if ui.add_enabled(on, egui::Button::new("Telemetry")).clicked() {
                 self.app.request_telemetry(pk);
             }
-            if c.kind == proto::ADV_REPEATER && ui.add_enabled(on, egui::Button::new("Trace route")).clicked() {
-                if let Err(e) = self.app.trace(pk) {
-                    self.app.toast(e);
+            if c.kind == proto::ADV_REPEATER {
+                if ui.add_enabled(on, egui::Button::new("Ping")).on_hover_text("Time a trace to the repeater and back (uses the known route, or assumes it is in direct range)").clicked() {
+                    if let Err(e) = self.app.ping(pk) {
+                        self.app.toast(e);
+                    }
                 }
+                if ui.add_enabled(on, egui::Button::new("Trace route")).clicked() {
+                    if let Err(e) = self.app.trace(pk) {
+                        self.app.toast(e);
+                    }
+                }
+                if ui.add_enabled(on, egui::Button::new("Neighbours")).on_hover_text("Nodes this repeater hears directly (log in first)").clicked() {
+                    self.app.request_neighbours(pk);
+                }
+            }
+            if (c.kind == proto::ADV_REPEATER || c.kind == proto::ADV_ROOM) && ui.add_enabled(on, egui::Button::new("Owner info")).on_hover_text("Firmware version, name and owner details (log in first)").clicked() {
+                self.app.request_owner(pk);
             }
             if ui.add_enabled(on, egui::Button::new("Discover path")).clicked() {
                 self.app.path_discovery(pk);
@@ -658,6 +765,24 @@ impl Gui {
         }
         if let Some(d) = &r.discovery {
             ui.label(RichText::new(d).monospace().small());
+        }
+        if let Some(p) = &r.ping {
+            ui.label(RichText::new(format!("Ping: {p}")).monospace().small());
+        }
+        if let Some(o) = &r.owner {
+            ui.label(RichText::new(format!("Owner info: {}", o.replace('\n', " · "))).small());
+        }
+        if let Some((total, list, at)) = &r.neighbours {
+            egui::CollapsingHeader::new(format!("Neighbours ({} of {total}, {})", list.len(), util::fmt_time(*at))).id_salt("neigh").default_open(true).show(ui, |ui| {
+                egui::Grid::new("neighgrid").num_columns(3).spacing([16.0, 2.0]).striped(true).show(ui, |ui| {
+                    for n in list {
+                        ui.label(self.app.relay_name(&n.prefix));
+                        ui.label(format!("{:+.1} dB", n.snr));
+                        ui.label(RichText::new(util::ago(util::now().saturating_sub(n.heard_secs_ago as u64))).color(Color32::GRAY));
+                        ui.end_row();
+                    }
+                });
+            });
         }
         let table = |ui: &mut egui::Ui, id: &str, title: String, rows: &[(String, String)]| {
             let r = egui::CollapsingHeader::new(title).id_salt(id).default_open(true).show(ui, |ui| {
@@ -691,7 +816,8 @@ impl Gui {
     fn home(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading("MeshCore");
+            ui.heading(crate::APP_NAME);
+            ui.label(RichText::new(crate::DISCLAIMER).small().color(Color32::GRAY));
             ui.add_space(10.0);
             match (&self.app.conn, &self.app.me) {
                 (Conn::Connected, Some(me)) => {
@@ -832,12 +958,17 @@ impl Gui {
                 self.blocked_tab(ui);
                 return;
             }
-            ui.add_enabled_ui(on, |ui| match self.tab {
-                SettingsTab::Node => self.node_tab(ui),
-                SettingsTab::Radio => self.radio_tab(ui),
-                SettingsTab::Channels => self.channels_tab(ui),
-                SettingsTab::Device => self.device_tab(ui),
-                SettingsTab::Blocked => {}
+            ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.75).auto_shrink([false, true]).show(ui, |ui| {
+                ui.add_enabled_ui(on, |ui| match self.tab {
+                    SettingsTab::Node => self.node_tab(ui),
+                    SettingsTab::Radio => {
+                        self.radio_tab(ui);
+                        self.radio_extras(ui);
+                    }
+                    SettingsTab::Channels => self.channels_tab(ui),
+                    SettingsTab::Device => self.device_tab(ui),
+                    SettingsTab::Blocked => {}
+                });
             });
         });
         self.show_settings = open;
@@ -859,9 +990,6 @@ impl Gui {
             ui.checkbox(&mut f.share_loc, "Include location in adverts");
             ui.end_row();
             ui.label("");
-            ui.checkbox(&mut f.manual_add, "Add new contacts manually (don't auto-add)");
-            ui.end_row();
-            ui.label("");
             ui.checkbox(&mut f.multi_acks, "Send extra ACKs (more reliable delivery)");
             ui.end_row();
             let modes = ["Nobody", "Favourites", "Everyone"];
@@ -875,10 +1003,54 @@ impl Gui {
                 ui.end_row();
             }
         });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.strong("New contacts heard on the mesh");
+        let f = &mut self.form;
+        ui.radio_value(&mut f.manual_add, false, "Add every node automatically");
+        ui.radio_value(&mut f.manual_add, true, "Add only the types ticked below (others are listed under Discovered)");
+        let supported = self.app.autoadd.is_some();
+        ui.add_enabled_ui(supported && f.manual_add, |ui| {
+            ui.horizontal(|ui| {
+                for (i, l) in ["Companions", "Repeaters", "Room servers", "Sensors"].iter().enumerate() {
+                    ui.checkbox(&mut f.autoadd_types[i], *l);
+                }
+            });
+        });
+        ui.add_enabled_ui(supported, |ui| {
+            ui.checkbox(&mut f.overwrite_oldest, "When the contact list is full, overwrite the oldest non-favourite contact");
+            ui.horizontal(|ui| {
+                ui.label("Only auto-add nodes up to");
+                ui.add(egui::DragValue::new(&mut f.max_hops).range(0..=64));
+                ui.label("hops away");
+            });
+            ui.label(RichText::new("0 = no limit; 1 = direct neighbours only; N = up to N−1 relays.").small().color(Color32::GRAY));
+        });
+        if !supported {
+            ui.label(RichText::new("Your radio's firmware doesn't support choosing types, overwriting the oldest contact or the hop limit. Update the firmware to use them.").small().color(Color32::GRAY));
+        }
+        ui.add_space(6.0);
+        ui.separator();
+        ui.strong("This computer");
+        let mut flash = self.app.settings.get("flash") != Some("0");
+        if ui.checkbox(&mut flash, "Flash the taskbar when a message arrives while the window is in the background").changed() {
+            self.app.settings.set("flash", if flash { "1" } else { "0" });
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
                 let f = &self.form;
+                if self.app.autoadd.is_some() {
+                    let mut cfg = if f.overwrite_oldest { proto::AUTOADD_OVERWRITE_OLDEST } else { 0 };
+                    for (i, bit) in [proto::AUTOADD_CHAT, proto::AUTOADD_REPEATER, proto::AUTOADD_ROOM, proto::AUTOADD_SENSOR].iter().enumerate() {
+                        if f.autoadd_types[i] {
+                            cfg |= bit;
+                        }
+                    }
+                    if self.app.autoadd != Some((cfg, f.max_hops)) {
+                        self.app.save_autoadd(cfg, f.max_hops);
+                    }
+                }
                 let me = self.app.me.clone().unwrap_or_default();
                 if f.name.trim() != me.name && !f.name.trim().is_empty() {
                     self.app.save_name(f.name.trim());
@@ -907,6 +1079,11 @@ impl Gui {
         let f = &mut self.form;
         let max_tx = self.app.me.as_ref().map(|m| m.max_tx_power as i32).unwrap_or(22).max(1);
         ui.label(RichText::new("All nodes in your mesh must use identical frequency, bandwidth, spreading factor and coding rate.").small().color(Color32::GRAY));
+        ui.label(
+            RichText::new("You are responsible for using a frequency, transmit power and duty cycle that are legal where you are (for example, in the UK and EU the 869.4–869.65 MHz band allows up to 500 mW at 10% duty cycle).")
+                .small()
+                .color(Color32::from_rgb(240, 200, 90)),
+        );
         egui::Grid::new("radio").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Frequency (MHz)");
             ui.text_edit_singleline(&mut f.freq);
@@ -928,14 +1105,31 @@ impl Gui {
             ui.add(egui::Slider::new(&mut f.tx, -9..=max_tx));
             ui.end_row();
         });
+        if self.app.device.as_ref().and_then(|d| d.repeat).is_some() {
+            ui.checkbox(&mut f.repeat, "Repeat other nodes' packets (client repeat mode)");
+            if !self.app.repeat_freqs.is_empty() {
+                let list: Vec<String> = self
+                    .app
+                    .repeat_freqs
+                    .iter()
+                    .map(|(lo, hi)| if lo == hi { format!("{:.3}", *lo as f64 / 1000.0) } else { format!("{:.3}–{:.3}", *lo as f64 / 1000.0, *hi as f64 / 1000.0) })
+                    .collect();
+                ui.label(RichText::new(format!("Repeat mode is only allowed on: {} MHz", list.join(", "))).small().color(Color32::GRAY));
+            }
+        }
         ui.add_space(8.0);
         if ui.button("Apply radio settings").clicked() {
             match f.freq.trim().parse::<f64>() {
                 Ok(mhz) if (150.0..=2500.0).contains(&mhz) => {
                     let (khz, bw, sf, cr, tx) = ((mhz * 1000.0).round() as u32, (f.bw * 1000.0).round() as u32, f.sf, f.cr, f.tx as i8);
                     let me = self.app.me.clone().unwrap_or_default();
-                    if (khz, bw, sf, cr) != (me.freq_khz, me.bw_hz, me.sf, me.cr) {
-                        self.app.save_radio(khz, bw, sf, cr);
+                    let dev_repeat = self.app.device.as_ref().and_then(|d| d.repeat);
+                    let repeat = dev_repeat.map(|_| f.repeat);
+                    let allowed = self.app.repeat_freqs.is_empty() || self.app.repeat_freqs.iter().any(|(lo, hi)| (*lo..=*hi).contains(&khz));
+                    if repeat == Some(true) && !allowed {
+                        self.app.toast("Repeat mode is only allowed on the frequencies listed".into());
+                    } else if (khz, bw, sf, cr) != (me.freq_khz, me.bw_hz, me.sf, me.cr) || repeat != dev_repeat {
+                        self.app.save_radio(khz, bw, sf, cr, repeat);
                     }
                     if tx != me.tx_power {
                         self.app.save_tx_power(tx);
@@ -943,6 +1137,58 @@ impl Gui {
                 }
                 _ => self.app.toast("Frequency must be between 150 and 2500 MHz".into()),
             }
+        }
+    }
+
+    /// Extra radio settings that only some firmware versions support.
+    fn radio_extras(&mut self, ui: &mut egui::Ui) {
+        let f = &mut self.form;
+        if let Some(cur) = self.app.device.as_ref().and_then(|d| d.path_hash_mode) {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Path hash size");
+                egui::ComboBox::from_id_salt("phash").selected_text(format!("{} byte{}", f.path_hash + 1, if f.path_hash == 0 { "" } else { "s" })).show_ui(ui, |ui| {
+                    for m in 0..3u8 {
+                        ui.selectable_value(&mut f.path_hash, m, format!("{} byte{}", m + 1, if m == 0 { "" } else { "s" }));
+                    }
+                });
+                if ui.add_enabled(f.path_hash != cur, egui::Button::new("Apply")).clicked() {
+                    self.app.save_path_hash_mode(f.path_hash);
+                }
+            });
+            ui.label(RichText::new("How many bytes identify each relay in a route. Larger values avoid mix-ups in big meshes, but nodes on older firmware may not understand them.").small().color(Color32::GRAY));
+        }
+        if let Some(cur) = self.app.default_scope.clone() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Region (flood scope)");
+                ui.add(egui::TextEdit::singleline(&mut f.region).hint_text("none").desired_width(160.0).char_limit(30));
+                let now = cur.map(|c| c.0).unwrap_or_default();
+                if ui.add_enabled(f.region.trim().trim_start_matches('#') != now, egui::Button::new("Save")).clicked() {
+                    let r = f.region.trim().to_string();
+                    self.app.save_scope(if r.is_empty() { None } else { Some(&r) });
+                }
+            });
+            ui.label(RichText::new("Limits your flood messages and adverts to repeaters that serve this region. Leave empty for none.").small().color(Color32::GRAY));
+        }
+        if self.app.tuning.is_some() {
+            ui.separator();
+            egui::CollapsingHeader::new("Advanced tuning").show(ui, |ui| {
+                egui::Grid::new("tuning").num_columns(2).show(ui, |ui| {
+                    ui.label("Receive delay base");
+                    ui.text_edit_singleline(&mut f.rx_delay);
+                    ui.end_row();
+                    ui.label("Airtime budget factor");
+                    ui.text_edit_singleline(&mut f.airtime);
+                    ui.end_row();
+                });
+                if ui.button("Apply tuning").clicked() {
+                    match (f.rx_delay.trim().parse::<f32>(), f.airtime.trim().parse::<f32>()) {
+                        (Ok(rx), Ok(af)) if rx >= 0.0 && af >= 0.0 => self.app.save_tuning((rx * 1000.0).round() as u32, (af * 1000.0).round() as u32),
+                        _ => self.app.toast("Tuning values must be numbers".into()),
+                    }
+                }
+            });
         }
     }
 
@@ -1033,10 +1279,128 @@ impl Gui {
                 }
             }
         });
+        // clock
         ui.separator();
-        if ui.button(RichText::new("Reboot radio").color(Color32::LIGHT_RED)).clicked() {
-            self.confirm = Some(("Reboot the radio now?".into(), Box::new(|a: &mut App| a.reboot())));
+        ui.horizontal(|ui| {
+            ui.strong("Clock");
+            if ui.small_button("Read").clicked() {
+                self.app.read_device_clock();
+            }
+        });
+        if let Some((radio, local)) = self.app.device_clock {
+            let drift = radio as i64 - local as i64;
+            ui.label(format!(
+                "Radio: {} · {}",
+                util::fmt_full(radio as u64),
+                if drift.abs() < 5 { "in step with this computer".to_string() } else { format!("{} s {} this computer", drift.abs(), if drift > 0 { "ahead of" } else { "behind" }) }
+            ));
         }
+        // own sensors
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("This radio's telemetry");
+            if ui.small_button("Read").clicked() {
+                self.app.request_self_telemetry();
+            }
+        });
+        if !self.app.self_telemetry.is_empty() {
+            egui::Grid::new("selftelem").num_columns(2).show(ui, |ui| {
+                for (k, v) in &self.app.self_telemetry {
+                    ui.label(RichText::new(k).color(Color32::GRAY));
+                    ui.label(v);
+                    ui.end_row();
+                }
+            });
+        }
+        // sensor/custom settings
+        if !self.app.custom_vars.is_empty() {
+            ui.separator();
+            ui.strong("Sensor settings");
+            if self.form.vars.len() != self.app.custom_vars.len() {
+                self.form.vars = self.app.custom_vars.clone();
+            }
+            let mut save = None;
+            egui::Grid::new("vars").num_columns(3).show(ui, |ui| {
+                for (i, (k, v)) in self.form.vars.iter_mut().enumerate() {
+                    ui.label(k.as_str());
+                    ui.add(egui::TextEdit::singleline(v).desired_width(140.0));
+                    if ui.add_enabled(*v != self.app.custom_vars[i].1, egui::Button::new("Save").small()).clicked() {
+                        save = Some((k.clone(), v.clone()));
+                    }
+                    ui.end_row();
+                }
+            });
+            if let Some((k, v)) = save {
+                self.app.save_custom_var(&k, &v);
+            }
+        }
+        // local console (firmware v1.18+, protocol 14)
+        if self.app.device.as_ref().map(|d| d.fw_ver >= 14).unwrap_or(false) {
+            ui.separator();
+            ui.strong("Radio console");
+            ScrollArea::vertical().id_salt("cli").max_height(120.0).stick_to_bottom(true).show(ui, |ui| {
+                for l in &self.app.cli_log {
+                    ui.label(RichText::new(l).monospace().small());
+                }
+            });
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.form.cli).hint_text("command, e.g. help").desired_width(260.0));
+                let go = (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) || ui.button("Run").clicked();
+                if go && !self.form.cli.trim().is_empty() {
+                    let c = std::mem::take(&mut self.form.cli);
+                    self.app.run_cli(c.trim());
+                    r.request_focus();
+                }
+            });
+        }
+        // identity
+        ui.separator();
+        egui::CollapsingHeader::new("Identity (private key)").show(ui, |ui| {
+            ui.label(RichText::new("The private key is your node's identity. Anyone who has it can impersonate you and read your direct messages. Keep it secret.").small().color(Color32::from_rgb(240, 200, 90)));
+            if ui.button("Export private key…").clicked() {
+                self.confirm = Some(("Show this radio's private key on screen?".into(), Box::new(|a: &mut App| a.export_private_key())));
+            }
+            if let Some(k) = self.app.private_key.clone() {
+                let mut h = hex(&k);
+                ui.add(egui::TextEdit::multiline(&mut h).font(egui::TextStyle::Monospace).desired_rows(2).desired_width(f32::INFINITY));
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(hex(&k));
+                    }
+                    if ui.button("Hide").clicked() {
+                        self.app.private_key = None;
+                    }
+                });
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.form.key_import).hint_text("128 hex characters").password(true).desired_width(260.0));
+                if ui.button("Import…").clicked() {
+                    match util::unhex(&self.form.key_import).and_then(|v| <[u8; 64]>::try_from(v).ok()) {
+                        Some(k) => {
+                            self.form.key_import.clear();
+                            self.confirm = Some((
+                                "Replace this radio's identity with the imported key? Contacts will need to re-learn it, and the current key is lost unless you exported it.".into(),
+                                Box::new(move |a: &mut App| a.import_private_key(k)),
+                            ));
+                        }
+                        None => self.app.toast("A private key is 64 bytes (128 hex characters)".into()),
+                    }
+                }
+            });
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Reboot radio").color(Color32::LIGHT_RED)).clicked() {
+                self.confirm = Some(("Reboot the radio now?".into(), Box::new(|a: &mut App| a.reboot())));
+            }
+            if ui.button(RichText::new("Factory reset…").color(Color32::LIGHT_RED)).clicked() {
+                self.confirm = Some((
+                    "Factory reset erases ALL settings, contacts, channels and the radio's identity, then restarts it. This cannot be undone. Continue?".into(),
+                    Box::new(|a: &mut App| a.factory_reset()),
+                ));
+            }
+        });
     }
 
     fn blocked_tab(&mut self, ui: &mut egui::Ui) {
@@ -1078,6 +1442,84 @@ impl Gui {
         });
     }
 
+    fn route_window(&mut self, ctx: &egui::Context) {
+        let Some(mut f) = self.route.take() else { return };
+        let mut open = true;
+        let mut done = false;
+        let name = self.app.name_of(&f.pk);
+        egui::Window::new(format!("Route to {name}")).open(&mut open).collapsible(false).default_width(420.0).show(ctx, |ui| {
+            ui.label("List the relays to go through, nearest first, as hex hashes separated by commas (e.g. 5a,7c). Leave empty to send directly (no relays).");
+            ui.add(egui::TextEdit::singleline(&mut f.text).hint_text("e.g. 5a,7c").desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                ui.label("Bytes per hop");
+                for n in 1..=3usize {
+                    ui.radio_value(&mut f.hash_size, n, n.to_string());
+                }
+            });
+            let mut reps: Vec<&Contact> = self.app.contacts.iter().filter(|c| c.kind == proto::ADV_REPEATER).collect();
+            reps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            egui::ComboBox::from_id_salt("addhop").selected_text("Add a repeater…").width(260.0).show_ui(ui, |ui| {
+                for r in reps {
+                    if ui.selectable_label(false, format!("{} ({})", r.name, hex(&r.pubkey[..f.hash_size]))).clicked() {
+                        if !f.text.trim().is_empty() {
+                            f.text.push(',');
+                        }
+                        f.text += &hex(&r.pubkey[..f.hash_size]);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Save route").clicked() {
+                    let mut bytes = Vec::new();
+                    let mut ok = true;
+                    for h in f.text.split([',', ' ', '>']).map(str::trim).filter(|h| !h.is_empty()) {
+                        match util::unhex(h) {
+                            Some(b) if b.len() == f.hash_size => bytes.extend(b),
+                            _ => ok = false,
+                        }
+                    }
+                    if !ok {
+                        self.app.toast(format!("Each hop must be {} hex characters", f.hash_size * 2));
+                    } else if bytes.len() / f.hash_size > 63 || bytes.len() > 64 {
+                        self.app.toast("Route is too long".into());
+                    } else {
+                        self.app.set_contact_path(f.pk, Some((bytes, f.hash_size)));
+                        done = true;
+                    }
+                }
+                if ui.button("Flood instead (forget route)").clicked() {
+                    self.app.set_contact_path(f.pk, None);
+                    done = true;
+                }
+            });
+        });
+        if open && !done {
+            self.route = Some(f);
+        }
+    }
+
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_about;
+        egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).default_width(420.0).show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading(crate::APP_NAME);
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+            });
+            ui.add_space(6.0);
+            ui.label(crate::DISCLAIMER);
+            ui.add_space(6.0);
+            ui.label("Copyright © Simon Blandford. Free software under the GNU General Public License v3.0; it comes with no warranty.");
+            ui.hyperlink_to("Source code and releases", crate::SOURCE_URL);
+            ui.add_space(6.0);
+            ui.strong("Acknowledgements");
+            ui.label("The companion-radio protocol is implemented from the MeshCore firmware (MIT licence, © Scott Powell / rippleradios.com) and meshcore.js (MIT licence). \"MeshCore\" is used only to identify the radios this app works with.");
+            ui.add_space(6.0);
+            ui.label("This app includes open-source libraries and fonts under their own licences. See THIRD-PARTY-NOTICES.txt, which is supplied with the app and in the source repository.");
+            ui.hyperlink_to("Third-party notices", format!("{}/blob/main/THIRD-PARTY-NOTICES.txt", crate::SOURCE_URL));
+        });
+        self.show_about = open;
+    }
+
     fn info_window(&mut self, ctx: &egui::Context) {
         let Some((key, id)) = self.info else { return };
         let Some(m) = self.app.find_message(key, id).cloned() else {
@@ -1102,10 +1544,13 @@ impl Gui {
                     rows.push(("SNR", format!("{snr:+.2} dB")));
                 }
             } else {
+                let channel = matches!(key, ChatKey::Channel(_));
                 rows.push((
                     "Status",
                     match m.status {
                         Status::Pending => "sending".into(),
+                        Status::Sent if channel => "sent (channel posts have no delivery receipts; see repeats below)".into(),
+                        Status::Sent if m.txt_type == proto::TXT_CLI_DATA => "sent (commands are not acknowledged)".into(),
                         Status::Sent => "sent, awaiting acknowledgement".into(),
                         Status::Delivered(rtt) if rtt > 0 => format!("delivered (round trip {:.2} s)", rtt as f32 / 1000.0),
                         Status::Delivered(_) => "delivered".into(),
@@ -1126,6 +1571,16 @@ impl Gui {
                 },
             ));
             rows.push(("Length", format!("{} bytes", m.text.len())));
+            if m.out {
+                rows.push((
+                    "Heard repeated by",
+                    if m.repeats.is_empty() {
+                        "no relays heard yet".into()
+                    } else {
+                        m.repeats.iter().map(|(h, snr)| format!("{} at {snr:+.1} dB", self.app.relay_name(h))).collect::<Vec<_>>().join("\n")
+                    },
+                ));
+            }
             egui::Grid::new("msginfo").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                 for (k, v) in rows {
                     ui.label(RichText::new(k).color(Color32::GRAY));
@@ -1319,12 +1774,15 @@ impl eframe::App for Gui {
                 c.unread = 0;
             }
         }
+        if std::mem::take(&mut self.app.attention) && self.app.settings.get("flash") != Some("0") && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        }
         let unread = self.app.total_unread();
         let name = self.app.me.as_ref().map(|m| m.name.as_str()).unwrap_or("");
         let title = match (name.is_empty(), unread) {
-            (true, _) => "MeshCore".to_string(),
-            (false, 0) => format!("MeshCore – {name}"),
-            (false, n) => format!("MeshCore – {name} ({n} unread)"),
+            (true, _) => crate::APP_NAME.to_string(),
+            (false, 0) => format!("{name} – {}", crate::APP_NAME),
+            (false, n) => format!("{name} ({n} unread) – {}", crate::APP_NAME),
         };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1360,12 +1818,16 @@ impl eframe::App for Gui {
         if self.show_settings {
             self.settings_window(&ctx);
         }
+        if self.show_about {
+            self.about_window(&ctx);
+        }
         if self.show_log {
             self.log_window(&ctx);
         }
         self.channel_window(&ctx);
         self.import_window(&ctx);
         self.info_window(&ctx);
+        self.route_window(&ctx);
         self.confirm_window(&ctx);
     }
 }
@@ -1393,7 +1855,9 @@ fn bubble(ui: &mut egui::Ui, m: &Message, mono: bool, show_author: bool, app: &A
     let max_w = (ui.available_width() * 0.75).max(200.0);
     ui.with_layout(layout, |ui| {
         let fill = if m.out { Color32::from_rgb(38, 70, 110) } else { ui.visuals().faint_bg_color };
-        let r = egui::Frame::new().fill(fill).corner_radius(8.0).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+        let mentioned = !m.out && app.me.as_ref().map(|me| !me.name.is_empty() && m.text.contains(&format!("@[{}]", me.name))).unwrap_or(false);
+        let stroke = if mentioned { egui::Stroke::new(1.5, Color32::from_rgb(240, 200, 90)) } else { egui::Stroke::NONE };
+        let r = egui::Frame::new().fill(fill).stroke(stroke).corner_radius(8.0).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.set_max_width(max_w);
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 if show_author && !m.out && !m.author.is_empty() {
@@ -1423,6 +1887,10 @@ fn bubble(ui: &mut egui::Ui, m: &Message, mono: bool, show_author: bool, app: &A
                         Status::Failed => " · ⚠ failed",
                         Status::Received => "",
                     };
+                    if !m.repeats.is_empty() {
+                        let n = m.repeats.len();
+                        meta += &format!(" · heard {n} repeat{}", if n == 1 { "" } else { "s" });
+                    }
                     if let Status::Delivered(rtt) = m.status {
                         if rtt > 0 {
                             meta += &format!(" ({:.1}s)", rtt as f32 / 1000.0);
@@ -1550,6 +2018,7 @@ mod tests {
             ack: 0,
             attempt: 0,
             deadline: None,
+            repeats: Vec::new(),
         };
         let key = ChatKey::Channel([1; 16]);
         let ctx = egui::Context::default();
